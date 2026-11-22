@@ -28,3 +28,6 @@ go.work
 
 # Kubeconfig might contain secrets
 *.kubeconfig
+
+# Run outputs (summaries are copied into docs when reported)
+results/

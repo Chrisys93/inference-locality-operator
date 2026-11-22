@@ -1,0 +1,17 @@
+# llm-d router v1.0.0, standalone chart (EPP plus Envoy sidecar, no Gateway API), sized for a 12 GB single node.
+# The default plugin set is kept: queue, KV-cache-use and prefix-cache scorers (weights 2/2/3), arm R1.
+router:
+  modelServers:
+    matchLabels:
+      app: sim-pool
+  epp:
+    image:
+      tag: v1.0.0                # chart default is "main"
+      pullPolicy: IfNotPresent
+    resources:                   # chart default: 8 CPU / 8 GiB requested, 16 GiB limit
+      requests: { cpu: 500m, memory: 512Mi }
+      limits: { memory: 1Gi }
+  proxy:
+    resources:                   # chart default: 4 CPU / 8 GiB requested, 16 GiB limit
+      requests: { cpu: 250m, memory: 128Mi }
+      limits: { memory: 512Mi }

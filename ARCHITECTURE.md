@@ -110,7 +110,7 @@ Arms, under identical machine conditions:
 
 | Arm | Routing |
 |---|---|
-| R0 | plain Kubernetes Service (round robin) |
+| R0 | plain Kubernetes Service (kube-proxy picks a pod at random) |
 | R1 | stock EPP: prefix-cache and queue scorers |
 | R2 | EPP plus `bucket-affinity-scorer`, buckets rebalanced on queueing delay |
 | R3 | as R2, other triggers (KV-cache use, hit rate) |

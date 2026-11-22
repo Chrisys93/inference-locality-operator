@@ -29,10 +29,26 @@ make manifests generate build test
 
 1. **Scaffold** (done 2026-11-19): `kubebuilder init` and `create api` for `PrefixAffinityPolicy`; builds, envtest
    passes.
-2. **Baseline on simulators:** Gateway API Inference Extension CRDs, two `llm-d-inference-sim` replicas, the
-   standalone llm-d router chart with the EPP sized for this node (the chart asks for 8 CPU / 8 GiB by default;
-   about 1 CPU / 1 GiB here), prefix-cache and queue scorers. Requests sent through the router's Envoy; routing
-   decisions and per-replica metrics logged.
+2. **Baseline on simulators** (files in `hack/sim-baseline/`; first full run started 2026-11-22):
+   Gateway API Inference Extension v1.6.2 CRDs; two `llm-d-inference-sim` v1.2.0 replicas (`sims.yaml`: simulated
+   tokenizer, KV cache of 512 blocks of 16 tokens, at most 4 running requests, per-token prefill so that cached
+   tokens shorten the first token); the standalone llm-d router chart v1.0.0 with its default scorers (queue 2,
+   KV-cache use 2, prefix cache 3) and the EPP and Envoy sized for this node (`router-values.yaml`; the chart asks
+   for 8 CPU / 8 GiB and 4 CPU / 8 GiB). `loadgen.py` sends RAG-shaped prompts (shared preamble, one of 32
+   documents, unique question) with uniform, Zipf or shifting-Zipf document choice, and records the replica that
+   served each request (`x-inference-pod`) and the cached prompt tokens. `run-baseline.sh` runs R0 and R1
+   interleaved with caches reset before each phase, then a soak of R1; `analyze.py` summarises. Results go to
+   `results/` (not committed).
+
+   ```sh
+   kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/v1.6.2/v1-manifests.yaml
+   kubectl apply -f hack/sim-baseline/sims.yaml
+   kubectl -n ilo-sim create configmap loadgen --from-file=hack/sim-baseline/loadgen.py
+   helm install router oci://ghcr.io/llm-d/charts/llm-d-router-standalone --version v1.0.0 -n ilo-sim \
+     -f hack/sim-baseline/router-values.yaml
+   hack/sim-baseline/run-baseline.sh results/sim-baseline-001
+   python3 -I hack/sim-baseline/analyze.py results/sim-baseline-001
+   ```
 3. **Controller:** the `PrefixAffinityPolicy` types, metrics scraping, bucket assignment and rebalancing, the
    ConfigMap, status; unit tests with envtest and fake metrics endpoints.
 4. **Scorer:** fork of the EPP at v1.0.0 with `bucket-affinity-scorer`; image built locally and loaded into minikube.
