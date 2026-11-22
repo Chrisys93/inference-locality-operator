@@ -1,0 +1,9 @@
+apiVersion: routing.chrisys93.github.io/v1alpha1
+kind: PrefixAffinityPolicy
+metadata:
+  labels:
+    app.kubernetes.io/name: inference-locality-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: prefixaffinitypolicy-sample
+spec:
+  # TODO(user): Add fields here
