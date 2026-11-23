@@ -29,7 +29,7 @@ make manifests generate build test
 
 1. **Scaffold** (done 2026-11-19): `kubebuilder init` and `create api` for `PrefixAffinityPolicy`; builds, envtest
    passes.
-2. **Baseline on simulators** (files in `hack/sim-baseline/`; first full run started 2026-11-22):
+2. **Baseline on simulators** (done 2026-11-23, run sim-baseline-001; files in `hack/sim-baseline/`):
    Gateway API Inference Extension v1.6.2 CRDs; two `llm-d-inference-sim` v1.2.0 replicas (`sims.yaml`: simulated
    tokenizer, KV cache of 512 blocks of 16 tokens, at most 4 running requests, per-token prefill so that cached
    tokens shorten the first token); the standalone llm-d router chart v1.0.0 with its default scorers (queue 2,
@@ -49,6 +49,15 @@ make manifests generate build test
    hack/sim-baseline/run-baseline.sh results/sim-baseline-001
    python3 -I hack/sim-baseline/analyze.py results/sim-baseline-001
    ```
+
+   sim-baseline-001 (2026-11-22/23, 2 h 29 min): 30 comparison phases of 3,000 requests (R0 and R1, three
+   workloads, five repeats) and a soak of R1 of 10 x 15,000 requests under the shifting workload. No request
+   failed, no pod restarted, no EPP warning or error; EPP memory 35-38 MiB, Envoy 29-30 MiB through the soak.
+   These are routing counts, not timings: with caches reset per phase, R1 kept each document on one replica
+   (1.01-1.05 replicas per document against 2.0 for R0) and served 94-95% of prompt tokens from cache against
+   77-88%, at the price of a less even split (busiest replica 54-64% of requests against 51%). In the soak, without
+   resets, documents spread to 1.1-1.4 replicas per 15,000 requests as the queue scorer moved load: the effect
+   `PrefixAffinityPolicy` is meant to control.
 3. **Controller:** the `PrefixAffinityPolicy` types, metrics scraping, bucket assignment and rebalancing, the
    ConfigMap, status; unit tests with envtest and fake metrics endpoints.
 4. **Scorer:** fork of the EPP at v1.0.0 with `bucket-affinity-scorer`; image built locally and loaded into minikube.

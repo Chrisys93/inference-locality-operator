@@ -1,7 +1,7 @@
 # Architecture
 
-Status: design, 2026-11-19. Only the kubebuilder scaffold exists (`PrefixAffinityPolicy` API and an empty
-reconciler). Everything below is the plan; measured results will be added as they come.
+Status: design, 2026-11-19; simulator baseline (R0, R1) run 2026-11-23, see `PREP.md` step 2. The controller and
+scorer are not written yet; everything below them is the plan.
 
 ## The problem
 
