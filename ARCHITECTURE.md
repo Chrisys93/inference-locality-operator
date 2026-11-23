@@ -1,7 +1,8 @@
 # Architecture
 
-Status: design, 2026-11-19; simulator baseline (R0, R1) run 2026-11-23, see `PREP.md` step 2. The controller and
-scorer are not written yet; everything below them is the plan.
+Status: design, 2026-11-19; simulator baseline (R0, R1) run 2026-11-23, see `PREP.md` step 2. Controller
+implemented and checked on the simulators 2026-11-23 (component 1); the scorer and `CachePolicy` are not written
+yet.
 
 ## The problem
 
@@ -48,50 +49,62 @@ The mapping to an inference pool:
 
 ### 1. `PrefixAffinityPolicy` (`routing.chrisys93.github.io/v1alpha1`)
 
-Draft spec (to be settled in code):
+Implemented 2026-11-23 (`api/v1alpha1`, `internal/controller`, `internal/buckets`, `internal/metrics`). Sample:
+`config/samples/routing_v1alpha1_prefixaffinitypolicy.yaml`.
 
 ```yaml
-apiVersion: routing.chrisys93.github.io/v1alpha1
-kind: PrefixAffinityPolicy
-metadata:
-  name: eval-pool
 spec:
-  poolRef: { name: vllm-pool }        # InferencePool, or modelServerSelector: { matchLabels: ... }
+  selector: { matchLabels: { app: sim-pool } }   # model-server pods, as the InferencePool selects them
+  metricsPort: 8000
+  metricsPath: /metrics
   buckets: 64                         # prefix-hash buckets shared out among the replicas
   prefix:
-    chars: 2048                       # leading part of the prompt that defines the bucket key
+    bytes: 2048                       # leading bytes of the prompt that define the bucket key
   trigger:
-    type: QueueDelay                  # QueueDelay | KVCacheUsage | HitRate
-    queueDelayFactor: 2.0             # rebalance when queue time > factor x mean service time
-    window: 60s
+    type: QueueDelay                  # QueueDelay | KVCacheUsage
+    queueDelayPercent: 200            # queueing delay > 200% of service time
+    kvCacheUsagePercent: 90           # for KVCacheUsage
+    minRequests: 20                   # fewer completed requests in the interval: replica not judged
   rebalance:
     interval: 30s
     maxMovesPerInterval: 4
-    cooldown: 2m
-    warmup: { enabled: true, maxPrefixesPerBucket: 8 }
-status:
-  observedReplicas: [ ... ]           # per replica: queue time, service time, KV use, hit rate
-  bucketMapRef: { name: eval-pool-bucket-map }   # ConfigMap: bucket -> replica
-  lastRebalance: ...
-  conditions: [ ... ]
+    minSharePercent: 25               # a replica keeps at least 25% of its fair share of buckets
+    cooldown: 2m                      # a moved bucket stays put this long
+status:                               # mapVersion, totalMoves, lastRebalanceTime, Ready condition, and per replica:
+  replicas: [ { name, buckets, requests, meanQueueMillis, meanServiceMillis, kvCacheUsagePercent, overloaded } ]
+  bucketMap: <policy>-bucket-map      # ConfigMap, key map.json
 ```
 
-The controller:
+Each interval the controller:
 
-1. lists the pool's replicas;
-2. scrapes each replica's `/metrics`: `vllm:request_queue_time_seconds` and `vllm:request_inference_time_seconds`
-   (histograms, for queueing delay against service time), `vllm:num_requests_waiting`, `vllm:kv_cache_usage_perc`,
-   `vllm:prefix_cache_hits_total` and `vllm:prefix_cache_queries_total`;
-3. starts from an even split of buckets over replicas (consistent hashing, so adding a replica moves few buckets);
-4. when the trigger fires for a replica, moves up to `maxMovesPerInterval` of its busiest buckets to the least
-   loaded replica, warms the new owner first, then publishes the new map;
-5. writes the map to a ConfigMap and the observations to `status`.
+1. lists the ready pods matching the selector;
+2. reads each pod's `/metrics` and takes the difference from the previous reading: requests completed
+   (`vllm:request_inference_time_seconds_count`), mean service time (its `_sum`) and mean queueing delay
+   (`vllm:request_queue_time_seconds_sum`, divided by the completed requests, since a server may record queue time
+   only for requests that waited), plus `vllm:kv_cache_usage_perc`. Reconciles caused by pod or map events between
+   intervals do not read metrics, so the window stays one interval long;
+3. keeps the map in step with the pods by rendezvous hashing: the first map gives each bucket to its highest-hash
+   pod; a pod that leaves hands its buckets to their winners among the rest; a pod that joins takes the buckets it
+   wins (about 1/n); buckets moved by rebalancing otherwise stay where they were moved;
+4. when the trigger fires for a pod and some pod is readable and below its trigger, moves up to
+   `maxMovesPerInterval` of the hot pod's buckets (not in cooldown) to the coolest pods in turn, never below the
+   `minSharePercent` floor;
+5. publishes the map (`map.json`: version, hash name, bucket count, prefix bytes, owner per bucket, move times and
+   count) in a ConfigMap owned by the policy, and patches the status.
+
+Not yet: choosing the busiest buckets to move (the logic takes per-bucket load, which only the scorer can supply),
+warming a bucket's new owner before the move is published, and the HitRate trigger.
+
+Checked on the simulators (2026-11-23): with 20 concurrent requests sent straight to one replica (4 slots), its
+queueing delay was about 4x its service time; the controller moved 4 buckets every 30 s down to the floor
+(29 -> 8 of 64 buckets, 21 moves, map version 7), with no errors and 14 MiB of memory. That traffic bypassed the
+router on purpose, so the moves could not relieve it; the run is what showed the floor was needed.
 
 ### 2. `bucket-affinity-scorer` (EPP plugin)
 
 llm-d router v1.0.0 registers plugins in tree only (`plugin.Register` in `cmd/epp/runner/runner.go`), so the
-scorer is built into a fork of the EPP image. It hashes the request's prefix exactly as the controller does, looks
-up the owner in the bucket map (watched ConfigMap) and scores the owner 1, others 0. It runs next to the stock
+scorer is built into a fork of the EPP image. It hashes the request's prefix exactly as the controller does (`buckets.Key`
+over the map's `prefixBytes`, imported from this module), looks up the owner in the bucket map (watched ConfigMap) and scores the owner 1, others 0. It runs next to the stock
 `prefix-cache-scorer` and `queue-scorer` with configurable weights, so that ownership guides placement without
 overriding the queue when a replica is saturated.
 

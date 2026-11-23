@@ -4,6 +4,20 @@ metadata:
   labels:
     app.kubernetes.io/name: inference-locality-operator
     app.kubernetes.io/managed-by: kustomize
-  name: prefixaffinitypolicy-sample
+  name: sim-pool
+  namespace: ilo-sim
 spec:
-  # TODO(user): Add fields here
+  selector:
+    matchLabels:
+      app: sim-pool          # the InferencePool's model servers (hack/sim-baseline/sims.yaml)
+  buckets: 64
+  prefix:
+    bytes: 2048
+  trigger:
+    type: QueueDelay
+    queueDelayPercent: 200   # queueing delay above twice the service time
+    minRequests: 20
+  rebalance:
+    interval: 30s
+    maxMovesPerInterval: 4
+    cooldown: 2m

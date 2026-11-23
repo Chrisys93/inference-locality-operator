@@ -58,8 +58,17 @@ make manifests generate build test
    77-88%, at the price of a less even split (busiest replica 54-64% of requests against 51%). In the soak, without
    resets, documents spread to 1.1-1.4 replicas per 15,000 requests as the queue scorer moved load: the effect
    `PrefixAffinityPolicy` is meant to control.
-3. **Controller:** the `PrefixAffinityPolicy` types, metrics scraping, bucket assignment and rebalancing, the
-   ConfigMap, status; unit tests with envtest and fake metrics endpoints.
+3. **Controller** (done 2026-11-23): the `PrefixAffinityPolicy` types, metric reading, bucket assignment and
+   rebalancing, the ConfigMap, status (see `ARCHITECTURE.md`, component 1); unit tests for the bucket logic and
+   the metrics reader, envtest tests for the reconciler with fake pods, metrics and clock. On minikube the image is
+   built from a host-built binary (no Go image needed):
+
+   ```sh
+   CGO_ENABLED=0 go build -o <dir>/manager cmd/main.go && cp hack/Dockerfile.prebuilt <dir>/Dockerfile
+   minikube image build -t inference-locality-operator:dev <dir>
+   make install deploy IMG=inference-locality-operator:dev     # then: git checkout config/manager/kustomization.yaml
+   kubectl apply -f config/samples/routing_v1alpha1_prefixaffinitypolicy.yaml
+   ```
 4. **Scorer:** fork of the EPP at v1.0.0 with `bucket-affinity-scorer`; image built locally and loaded into minikube.
 5. **Measurement on GPU:** two vLLM replicas sharing the GPU; arms R0-R3 of `ARCHITECTURE.md` with the
    code-doc-assistant evaluation set and synthetic skewed workloads.

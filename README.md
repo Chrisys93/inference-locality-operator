@@ -11,7 +11,7 @@ delete on expiry). See [ARCHITECTURE.md](ARCHITECTURE.md) for the design and the
 the environment and order of work. The workload and evaluation come from
 [code-doc-assistant](https://github.com/Chrisys93/code-doc-assistant).
 
-**Status (2026-11-19):** design and kubebuilder scaffold only.
+**Status (2026-11-23):** simulator baseline run; `PrefixAffinityPolicy` controller implemented and checked on the simulators. Next: the EPP scorer that routes by the bucket map.
 
 ## Getting Started
 

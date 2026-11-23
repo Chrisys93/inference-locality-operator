@@ -1,0 +1,155 @@
+package buckets
+
+import (
+	"sort"
+	"strconv"
+	"time"
+)
+
+// Trigger selects the overload signal.
+type Trigger string
+
+const (
+	// QueueDelay: mean queueing delay above QueueDelayPercent/100 x mean service time.
+	QueueDelay Trigger = "QueueDelay"
+	// KVCacheUsage: KV-cache use above KVCacheUsagePercent.
+	KVCacheUsage Trigger = "KVCacheUsage"
+)
+
+// Load is what was observed of one replica over the last interval.
+type Load struct {
+	Name           string
+	OK             bool // metrics were read
+	Requests       int64
+	MeanQueueSec   float64
+	MeanServiceSec float64
+	KVCacheUsage   float64 // 0..1
+}
+
+// Config holds the trigger and the limits on moves.
+type Config struct {
+	Trigger             Trigger
+	QueueDelayPercent   int
+	KVCacheUsagePercent int
+	MinRequests         int64
+	MaxMoves            int
+	Cooldown            time.Duration
+	// MinBuckets is the fewest buckets rebalancing leaves on a replica (at least 1).
+	MinBuckets int
+}
+
+// Move is one bucket changing owner.
+type Move struct {
+	Bucket   int
+	From, To string
+}
+
+// Overloaded reports whether the trigger fires for a replica.
+func (c Config) Overloaded(l Load) bool {
+	if !l.OK {
+		return false
+	}
+	switch c.Trigger {
+	case KVCacheUsage:
+		return l.KVCacheUsage*100 > float64(c.KVCacheUsagePercent)
+	default:
+		return l.Requests >= c.MinRequests && l.MeanServiceSec > 0 &&
+			l.MeanQueueSec > float64(c.QueueDelayPercent)/100*l.MeanServiceSec
+	}
+}
+
+// pressure orders replicas from least to most loaded under the trigger's signal.
+func (c Config) pressure(l Load) float64 {
+	if c.Trigger == KVCacheUsage {
+		return l.KVCacheUsage
+	}
+	if l.MeanServiceSec <= 0 {
+		return 0
+	}
+	return l.MeanQueueSec / l.MeanServiceSec
+}
+
+// Rebalance decides which buckets move away from overloaded replicas, and applies the moves to m (version and
+// MovedAt included). bucketLoad, when known (requests per bucket in the interval, from the scorer), makes the
+// busiest buckets move first; without it, buckets move in index order starting from a point that advances with
+// the map version, so successive moves do not always take the same buckets.
+//
+// Rules: only buckets out of their cooldown move; an overloaded replica keeps at least MinBuckets (and at least
+// one) bucket; targets are replicas whose metrics were read and whose trigger did not fire, least loaded first,
+// taken in turn; at most MaxMoves buckets move in total.
+func Rebalance(m *Map, loads []Load, c Config, now time.Time, bucketLoad map[int]float64) []Move {
+	if c.MaxMoves <= 0 || len(m.Owners) == 0 {
+		return nil
+	}
+	var hot, cool []Load
+	for _, l := range loads {
+		if c.Overloaded(l) {
+			hot = append(hot, l)
+		} else if l.OK {
+			cool = append(cool, l)
+		}
+	}
+	if len(hot) == 0 || len(cool) == 0 {
+		return nil
+	}
+	counts := m.Counts()
+	floor := c.MinBuckets
+	if floor < 1 {
+		floor = 1
+	}
+	sort.SliceStable(hot, func(i, j int) bool { return c.pressure(hot[i]) > c.pressure(hot[j]) })
+	sort.SliceStable(cool, func(i, j int) bool {
+		pi, pj := c.pressure(cool[i]), c.pressure(cool[j])
+		if pi != pj {
+			return pi < pj
+		}
+		if counts[cool[i].Name] != counts[cool[j].Name] {
+			return counts[cool[i].Name] < counts[cool[j].Name]
+		}
+		return cool[i].Name < cool[j].Name
+	})
+
+	n := len(m.Owners)
+	start := int(m.Version) % n
+	var moves []Move
+	t := 0
+	for _, h := range hot {
+		var owned []int
+		for i := 0; i < n; i++ {
+			b := (start + i) % n
+			if m.Owners[b] != h.Name {
+				continue
+			}
+			if at, ok := m.MovedAt[strconv.Itoa(b)]; ok && now.Sub(time.Unix(at, 0)) < c.Cooldown {
+				continue
+			}
+			owned = append(owned, b)
+		}
+		if bucketLoad != nil {
+			sort.SliceStable(owned, func(i, j int) bool { return bucketLoad[owned[i]] > bucketLoad[owned[j]] })
+		}
+		for _, b := range owned {
+			if len(moves) >= c.MaxMoves || counts[h.Name] <= floor {
+				break
+			}
+			to := cool[t%len(cool)].Name
+			t++
+			moves = append(moves, Move{Bucket: b, From: h.Name, To: to})
+			counts[h.Name]--
+			counts[to]++
+		}
+	}
+	if len(moves) > 0 {
+		if m.MovedAt == nil {
+			m.MovedAt = map[string]int64{}
+		}
+		for _, mv := range moves {
+			m.Owners[mv.Bucket] = mv.To
+			m.MovedAt[strconv.Itoa(mv.Bucket)] = now.Unix()
+		}
+		m.Version++
+		m.Moves += int64(len(moves))
+		m.LastMove = now.Unix()
+	}
+	return moves
+}

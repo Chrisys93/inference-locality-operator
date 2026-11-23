@@ -1,0 +1,7 @@
+# Packages a manager binary built on the host (CGO_ENABLED=0 go build -o bin/manager cmd/main.go), so a local
+# image needs no Go toolchain image. The full multi-stage build is ../Dockerfile.
+FROM gcr.io/distroless/static:nonroot
+WORKDIR /
+COPY manager /manager
+USER 65532:65532
+ENTRYPOINT ["/manager"]

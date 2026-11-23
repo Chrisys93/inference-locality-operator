@@ -14,7 +14,20 @@ spec:
     singular: prefixaffinitypolicy
   scope: Namespaced
   versions:
-  - name: v1alpha1
+  - additionalPrinterColumns:
+    - jsonPath: .spec.buckets
+      name: Buckets
+      type: integer
+    - jsonPath: .status.mapVersion
+      name: Map version
+      type: integer
+    - jsonPath: .status.totalMoves
+      name: Moves
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
     schema:
       openAPIV3Schema:
         description: PrefixAffinityPolicy is the Schema for the prefixaffinitypolicies
@@ -40,25 +53,163 @@ spec:
           spec:
             description: spec defines the desired state of PrefixAffinityPolicy
             properties:
-              foo:
-                description: foo is an example field of PrefixAffinityPolicy. Edit
-                  prefixaffinitypolicy_types.go to remove/update
+              buckets:
+                default: 64
+                description: buckets is the number of prefix-hash buckets shared out
+                  among the replicas.
+                format: int32
+                maximum: 4096
+                minimum: 1
+                type: integer
+              metricsPath:
+                default: /metrics
+                description: metricsPath is the path of the metrics endpoint.
                 type: string
+              metricsPort:
+                default: 8000
+                description: metricsPort is the port serving Prometheus metrics on
+                  each model-server pod.
+                format: int32
+                type: integer
+              prefix:
+                description: PrefixSpec defines the part of the prompt that names
+                  a bucket.
+                properties:
+                  bytes:
+                    default: 2048
+                    description: |-
+                      bytes is the number of leading bytes of the prompt (UTF-8) hashed into the bucket key. The scorer reads the
+                      value from the published bucket map, so both use the same.
+                    format: int32
+                    minimum: 16
+                    type: integer
+                type: object
+              rebalance:
+                description: RebalanceSpec bounds how buckets move.
+                properties:
+                  cooldown:
+                    default: 2m
+                    description: cooldown is the time a moved bucket stays with its
+                      new owner before it can move again.
+                    type: string
+                  interval:
+                    default: 30s
+                    description: interval between metric reads and rebalancing decisions.
+                    type: string
+                  maxMovesPerInterval:
+                    default: 4
+                    description: maxMovesPerInterval caps the buckets moved in one
+                      interval.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  minSharePercent:
+                    default: 25
+                    description: |-
+                      minSharePercent is the floor on how far rebalancing can drain a replica: it keeps at least this percentage
+                      of its fair share (buckets / replicas), and never less than one bucket. Without a floor, a replica whose
+                      load does not follow its buckets (traffic that bypasses the router) would be stripped bare.
+                    format: int32
+                    maximum: 100
+                    minimum: 0
+                    type: integer
+                type: object
+              selector:
+                description: |-
+                  selector picks the model-server pods (in the policy's namespace) whose prefix space is shared out; normally
+                  the same labels as the InferencePool's selector.
+                properties:
+                  matchExpressions:
+                    description: matchExpressions is a list of label selector requirements.
+                      The requirements are ANDed.
+                    items:
+                      description: |-
+                        A label selector requirement is a selector that contains values, a key, and an operator that
+                        relates the key and values.
+                      properties:
+                        key:
+                          description: key is the label key that the selector applies
+                            to.
+                          type: string
+                        operator:
+                          description: |-
+                            operator represents a key's relationship to a set of values.
+                            Valid operators are In, NotIn, Exists and DoesNotExist.
+                          type: string
+                        values:
+                          description: |-
+                            values is an array of string values. If the operator is In or NotIn,
+                            the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                            the values array must be empty. This array is replaced during a strategic
+                            merge patch.
+                          items:
+                            type: string
+                          type: array
+                          x-kubernetes-list-type: atomic
+                      required:
+                      - key
+                      - operator
+                      type: object
+                    type: array
+                    x-kubernetes-list-type: atomic
+                  matchLabels:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                      map is equivalent to an element of matchExpressions, whose key field is "key", the
+                      operator is "In", and the values array contains only "value". The requirements are ANDed.
+                    type: object
+                type: object
+                x-kubernetes-map-type: atomic
+              trigger:
+                description: TriggerSpec defines when a replica counts as overloaded.
+                properties:
+                  kvCacheUsagePercent:
+                    default: 90
+                    description: 'kvCacheUsagePercent: KVCacheUsage fires when the
+                      replica reports a KV-cache use above this percentage.'
+                    format: int32
+                    maximum: 100
+                    minimum: 1
+                    type: integer
+                  minRequests:
+                    default: 20
+                    description: |-
+                      minRequests is the number of requests a replica must have completed in the interval for its QueueDelay
+                      figures to count; below it the replica is not judged.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  queueDelayPercent:
+                    default: 200
+                    description: |-
+                      queueDelayPercent: QueueDelay fires when mean queueing delay > queueDelayPercent/100 x mean service time
+                      over the last interval. 200 is the "twice the service time" trigger.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  type:
+                    default: QueueDelay
+                    description: type of the trigger.
+                    enum:
+                    - QueueDelay
+                    - KVCacheUsage
+                    type: string
+                type: object
+            required:
+            - selector
             type: object
           status:
             description: status defines the observed state of PrefixAffinityPolicy
             properties:
+              bucketMap:
+                description: bucketMap is the name of the ConfigMap holding the bucket-to-replica
+                  map.
+                type: string
               conditions:
-                description: |-
-                  conditions represent the current state of the PrefixAffinityPolicy resource.
-                  Each condition has a unique type and reflects the status of a specific aspect of the resource.
-
-                  Standard condition types include:
-                  - "Available": the resource is fully functional
-                  - "Progressing": the resource is being created or updated
-                  - "Degraded": the resource failed to reach or maintain its desired state
-
-                  The status of each condition is one of True, False, or Unknown.
+                description: 'conditions: "Ready" is true when a map covering every
+                  bucket has been published.'
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -117,6 +268,74 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              lastRebalanceTime:
+                description: lastRebalanceTime is when buckets last moved because
+                  of the trigger.
+                format: date-time
+                type: string
+              mapVersion:
+                description: mapVersion increases every time the map changes.
+                format: int64
+                type: integer
+              observedGeneration:
+                description: observedGeneration is the generation of the spec last
+                  acted on.
+                format: int64
+                type: integer
+              replicas:
+                description: replicas as seen in the last interval.
+                items:
+                  description: ReplicaStatus is what the controller saw of one replica
+                    in the last interval.
+                  properties:
+                    buckets:
+                      description: buckets owned.
+                      format: int32
+                      type: integer
+                    kvCacheUsagePercent:
+                      description: kvCacheUsagePercent at the last read.
+                      format: int32
+                      type: integer
+                    meanQueueMillis:
+                      description: meanQueueMillis is the mean queueing delay per
+                        completed request in the last interval.
+                      format: int64
+                      type: integer
+                    meanServiceMillis:
+                      description: meanServiceMillis is the mean inference (service)
+                        time per completed request in the last interval.
+                      format: int64
+                      type: integer
+                    name:
+                      description: name of the pod.
+                      type: string
+                    overloaded:
+                      description: overloaded is true when the trigger fired for this
+                        replica in the last interval.
+                      type: boolean
+                    requests:
+                      description: requests completed in the last interval.
+                      format: int64
+                      type: integer
+                    scrapeError:
+                      description: scrapeError is set when the metrics could not be
+                        read.
+                      type: string
+                  required:
+                  - buckets
+                  - kvCacheUsagePercent
+                  - meanQueueMillis
+                  - meanServiceMillis
+                  - name
+                  - overloaded
+                  - requests
+                  type: object
+                type: array
+              totalMoves:
+                description: totalMoves counts the buckets moved by the trigger since
+                  the policy was created.
+                format: int64
+                type: integer
             type: object
         required:
         - spec
