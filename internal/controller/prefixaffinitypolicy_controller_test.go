@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"maps"
 	"strings"
 	"sync"
 	"time"
@@ -47,14 +48,12 @@ type fakeScraper struct {
 func (f *fakeScraper) Scrape(_ context.Context, url string) (metrics.Sample, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	ip := strings.Split(strings.TrimPrefix(url, "http://"), ":")[0]
+	ip, _, _ := strings.Cut(strings.TrimPrefix(url, "http://"), ":")
 	if f.fail[ip] {
 		return metrics.Sample{}, fmt.Errorf("connection refused")
 	}
 	v := map[string]float64{}
-	for k, x := range f.vals[ip] {
-		v[k] = x
-	}
+	maps.Copy(v, f.vals[ip])
 	return metrics.Sample{Time: time.Now(), Values: v}, nil
 }
 
@@ -85,8 +84,8 @@ var _ = Describe("PrefixAffinityPolicy Controller", func() {
 
 	makePod := func(name, app, ip string) {
 		pod := &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, Labels: map[string]string{"app": app}},
-			Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "sim", Image: "sim"}}},
+			Name: name, Namespace: ns, Labels: map[string]string{"app": app},
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "sim", Image: "sim"}}},
 		}
 		Expect(k8sClient.Create(ctx, pod)).To(Succeed())
 		pod.Status = corev1.PodStatus{
@@ -97,7 +96,7 @@ var _ = Describe("PrefixAffinityPolicy Controller", func() {
 	}
 
 	deletePod := func(name string) {
-		pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}}
+		pod := &corev1.Pod{Name: name, Namespace: ns}
 		Expect(k8sClient.Delete(ctx, pod, client.GracePeriodSeconds(0))).To(Succeed())
 		Eventually(func() bool {
 			return k8sClient.Get(ctx, client.ObjectKeyFromObject(pod), pod) != nil
@@ -106,7 +105,7 @@ var _ = Describe("PrefixAffinityPolicy Controller", func() {
 
 	makePolicy := func(name, app string) types.NamespacedName {
 		p := &routingv1alpha1.PrefixAffinityPolicy{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+			Name: name, Namespace: ns,
 			Spec: routingv1alpha1.PrefixAffinityPolicySpec{
 				Selector:  metav1.LabelSelector{MatchLabels: map[string]string{"app": app}},
 				Buckets:   32,
@@ -222,8 +221,8 @@ var _ = Describe("PrefixAffinityPolicy Controller", func() {
 		t0 = t0.Add(11 * 30 * time.Second)
 
 		// calm interval: nothing moves
-		scraper.serve("10.0.1.1", 100, 0.1, 0.2)
-		scraper.serve("10.0.1.2", 100, 0.1, 0.2)
+		scraper.serve("10.0.1.1", 100, 0.1, 0.3) // service times differ between pods and intervals
+		scraper.serve("10.0.1.2", 100, 0.1, 0.25)
 		moves, version := getPolicy(key).Status.TotalMoves, getMap(key).Version
 		reconcileAt(key, t0.Add(60*time.Second))
 		Expect(getPolicy(key).Status.TotalMoves).To(Equal(moves))
@@ -235,7 +234,7 @@ var _ = Describe("PrefixAffinityPolicy Controller", func() {
 		makePod("c2", "pool-c", "10.0.2.2")
 		key := makePolicy("scrape-error", "pool-c")
 		reconcileAt(key, clock)
-		scraper.serve("10.0.2.1", 100, 1.0, 0.2)
+		scraper.serve("10.0.2.1", 40, 1.0, 0.2)
 		scraper.fail["10.0.2.2"] = true // the only possible target is unreadable
 		reconcileAt(key, clock.Add(30*time.Second))
 		p := getPolicy(key)

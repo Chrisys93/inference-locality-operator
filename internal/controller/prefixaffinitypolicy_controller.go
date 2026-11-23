@@ -19,7 +19,8 @@ package controller
 import (
 	"context"
 	"fmt"
-	"sort"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -109,7 +110,7 @@ func (r *PrefixAffinityPolicyReconciler) Reconcile(ctx context.Context, req ctrl
 	loads, statuses, measured := r.observe(ctx, req.NamespacedName, replicas, spec, now)
 
 	// Map: start from the published one, follow replica changes, then rebalance.
-	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: policy.Name + "-bucket-map", Namespace: policy.Namespace}}
+	cm := &corev1.ConfigMap{Name: policy.Name + "-bucket-map", Namespace: policy.Namespace}
 	var prev *buckets.Map
 	if err := r.Get(ctx, client.ObjectKeyFromObject(cm), cm); err == nil {
 		if m, derr := buckets.Decode(cm.Data[MapKey]); derr == nil {
@@ -225,7 +226,7 @@ func (r *PrefixAffinityPolicyReconciler) readyReplicas(ctx context.Context, p *r
 			ready = append(ready, pod)
 		}
 	}
-	sort.Slice(ready, func(i, j int) bool { return ready[i].Name < ready[j].Name })
+	slices.SortFunc(ready, func(a, b corev1.Pod) int { return strings.Compare(a.Name, b.Name) })
 	return ready, nil
 }
 

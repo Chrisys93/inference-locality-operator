@@ -1,7 +1,8 @@
 package buckets
 
 import (
-	"sort"
+	"cmp"
+	"slices"
 	"strconv"
 	"time"
 )
@@ -93,20 +94,14 @@ func Rebalance(m *Map, loads []Load, c Config, now time.Time, bucketLoad map[int
 		return nil
 	}
 	counts := m.Counts()
-	floor := c.MinBuckets
-	if floor < 1 {
-		floor = 1
-	}
-	sort.SliceStable(hot, func(i, j int) bool { return c.pressure(hot[i]) > c.pressure(hot[j]) })
-	sort.SliceStable(cool, func(i, j int) bool {
-		pi, pj := c.pressure(cool[i]), c.pressure(cool[j])
-		if pi != pj {
-			return pi < pj
-		}
-		if counts[cool[i].Name] != counts[cool[j].Name] {
-			return counts[cool[i].Name] < counts[cool[j].Name]
-		}
-		return cool[i].Name < cool[j].Name
+	floor := max(c.MinBuckets, 1)
+	slices.SortStableFunc(hot, func(a, b Load) int { return cmp.Compare(c.pressure(b), c.pressure(a)) })
+	slices.SortStableFunc(cool, func(a, b Load) int {
+		return cmp.Or(
+			cmp.Compare(c.pressure(a), c.pressure(b)),
+			cmp.Compare(counts[a.Name], counts[b.Name]),
+			cmp.Compare(a.Name, b.Name),
+		)
 	})
 
 	n := len(m.Owners)
@@ -115,7 +110,7 @@ func Rebalance(m *Map, loads []Load, c Config, now time.Time, bucketLoad map[int
 	t := 0
 	for _, h := range hot {
 		var owned []int
-		for i := 0; i < n; i++ {
+		for i := range n {
 			b := (start + i) % n
 			if m.Owners[b] != h.Name {
 				continue
@@ -126,7 +121,7 @@ func Rebalance(m *Map, loads []Load, c Config, now time.Time, bucketLoad map[int
 			owned = append(owned, b)
 		}
 		if bucketLoad != nil {
-			sort.SliceStable(owned, func(i, j int) bool { return bucketLoad[owned[i]] > bucketLoad[owned[j]] })
+			slices.SortStableFunc(owned, func(a, b int) int { return cmp.Compare(bucketLoad[b], bucketLoad[a]) })
 		}
 		for _, b := range owned {
 			if len(moves) >= c.MaxMoves || counts[h.Name] <= floor {

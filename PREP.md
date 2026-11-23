@@ -19,10 +19,11 @@ Installed in the user's home directory, downloads checked against the published 
 | Go | 1.27.4 | `~/.local/go` |
 | kubebuilder | v4.16.0 | `~/.local/bin` |
 | controller-gen, envtest binaries | from the Makefile | `./bin` |
+| golangci-lint (custom build with the logcheck plugin) | v2.15.0, in `Makefile` and `.custom-gcl.yml` (2026-11-23; v2.13.1 could not read Go 1.27 export data) | `./bin` |
 
 ```sh
 export PATH=$HOME/.local/go/bin:$HOME/go/bin:$HOME/.local/bin:$PATH
-make manifests generate build test
+make manifests generate build test lint
 ```
 
 ## Steps

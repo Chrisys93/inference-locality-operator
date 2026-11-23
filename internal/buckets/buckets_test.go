@@ -13,7 +13,7 @@ func TestKeyUsesOnlyThePrefix(t *testing.T) {
 	if a != b {
 		t.Fatalf("same first 30 bytes, different buckets: %d %d", a, b)
 	}
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		if k := Key(fmt.Sprintf("doc %d", i), 2048, 7); k < 0 || k >= 7 {
 			t.Fatalf("bucket %d out of range", k)
 		}

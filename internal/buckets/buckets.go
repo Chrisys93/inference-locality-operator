@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
-	"sort"
+	"slices"
 	"strconv"
 )
 
@@ -89,7 +89,7 @@ func hrwOwner(bucket int, replicas []string) string {
 // about 1/n of the buckets and keeps earlier rebalancing elsewhere. changed reports whether any owner changed.
 func Assign(prev *Map, replicas []string, buckets, prefixBytes int) (m *Map, changed bool) {
 	names := append([]string(nil), replicas...)
-	sort.Strings(names)
+	slices.Sort(names)
 	m = &Map{Hash: HashName, Buckets: buckets, PrefixBytes: prefixBytes, Owners: make([]string, buckets)}
 	if prev != nil {
 		m.Moves, m.LastMove = prev.Moves, prev.LastMove
