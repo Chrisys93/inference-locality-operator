@@ -1,0 +1,29 @@
+# A service account allowed to read the EPP's metrics endpoint (which checks tokens), for the per-bucket counters:
+#   kubectl -n ilo-sim port-forward deploy/router-epp 9090 &
+#   curl -sk -H "Authorization: Bearer $(kubectl -n ilo-sim create token epp-metrics-reader)" https://localhost:9090/metrics
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: epp-metrics-reader
+  namespace: ilo-sim
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ilo-epp-metrics-reader
+rules:
+- nonResourceURLs: [/metrics]
+  verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ilo-epp-metrics-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ilo-epp-metrics-reader
+subjects:
+- kind: ServiceAccount
+  name: epp-metrics-reader
+  namespace: ilo-sim

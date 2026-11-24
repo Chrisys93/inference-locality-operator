@@ -1,0 +1,42 @@
+# Arm R2: applied on top of router-values.yaml. The EPP image with bucket-affinity-scorer (hack/Dockerfile.epp-prebuilt)
+# and the stock plugins plus that scorer. Its weight equals the prefix-cache scorer's: the owner of a request's bucket
+# is preferred, and the queue and KV-cache scorers still count. The bucket map is the PrefixAffinityPolicy's ConfigMap,
+# which the EPP may read through epp-bucket-map-rbac.yaml.
+router:
+  epp:
+    image:
+      registry: ilo
+      repository: epp-bucket-affinity
+      tag: dev1
+      pullPolicy: IfNotPresent
+    flags:
+      allow-experimental-plugins: true   # the scorer is registered as Alpha
+    pluginsConfigFile: bucket-affinity.yaml
+    pluginsCustomConfig:
+      bucket-affinity.yaml: |
+        apiVersion: llm-d.ai/v1
+        kind: EndpointPickerConfig
+        plugins:
+        - type: queue-scorer
+        - type: kv-cache-utilization-scorer
+        - type: prefix-cache-scorer
+        - type: bucket-affinity-scorer
+          parameters:
+            configMap: sim-pool-bucket-map
+        - type: metrics-data-source
+          parameters:
+            scheme: "http"
+            path: "/metrics"
+            insecureSkipVerify: true
+        - type: core-metrics-extractor
+        schedulingProfiles:
+        - name: default
+          plugins:
+          - pluginRef: queue-scorer
+            weight: 2
+          - pluginRef: kv-cache-utilization-scorer
+            weight: 2
+          - pluginRef: prefix-cache-scorer
+            weight: 3
+          - pluginRef: bucket-affinity-scorer
+            weight: 3

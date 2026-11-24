@@ -1,0 +1,9 @@
+# Packages the EPP with bucket-affinity-scorer, built on the host
+# (cd epp && CGO_ENABLED=0 go build -ldflags="-s -w" -o <dir>/epp ./cmd/epp), like the stock llm-d router image:
+# a static binary on distroless, same ports.
+FROM gcr.io/distroless/static:nonroot
+WORKDIR /
+COPY epp /app/epp
+USER 65532:65532
+EXPOSE 9002 9003 9090 5557
+ENTRYPOINT ["/app/epp"]

@@ -227,6 +227,14 @@ var _ = Describe("PrefixAffinityPolicy Controller", func() {
 		reconcileAt(key, t0.Add(60*time.Second))
 		Expect(getPolicy(key).Status.TotalMoves).To(Equal(moves))
 		Expect(getMap(key).Version).To(Equal(version))
+
+		// the map deleted by hand: rebuilt from scratch, and the status forgets the earlier moves
+		Expect(k8sClient.Delete(ctx, &corev1.ConfigMap{Name: "rebalance-bucket-map", Namespace: ns})).To(Succeed())
+		reconcileAt(key, t0.Add(61*time.Second))
+		p = getPolicy(key)
+		Expect(p.Status.TotalMoves).To(BeZero())
+		Expect(p.Status.LastRebalanceTime).To(BeNil())
+		Expect(getMap(key).Counts()["b1"]).To(Equal(before["b1"]))
 	})
 
 	It("does not judge a replica whose metrics cannot be read", func() {

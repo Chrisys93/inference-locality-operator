@@ -144,6 +144,7 @@ func (r *PrefixAffinityPolicyReconciler) Reconcile(ctx context.Context, req ctrl
 	status.BucketMap = cm.Name
 	status.MapVersion = m.Version
 	status.TotalMoves = m.Moves
+	status.LastRebalanceTime = nil // a map rebuilt from scratch has no moves
 	if m.LastMove > 0 {
 		t := metav1.NewTime(time.Unix(m.LastMove, 0))
 		status.LastRebalanceTime = &t

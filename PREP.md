@@ -70,7 +70,23 @@ make manifests generate build test lint
    make install deploy IMG=inference-locality-operator:dev     # then: git checkout config/manager/kustomization.yaml
    kubectl apply -f config/samples/routing_v1alpha1_prefixaffinitypolicy.yaml
    ```
-4. **Scorer:** fork of the EPP at v1.0.0 with `bucket-affinity-scorer`; image built locally and loaded into minikube.
+4. **Scorer** (done 2026-11-23): `bucket-affinity-scorer` in `epp/` (own Go module, importing llm-d router v1.0.0
+   and `internal/buckets`), registered by `epp/cmd/epp` before the stock runner starts; unit tests for scoring, the
+   prompt text and the per-bucket counters. Arm R2 on the simulators:
+
+   ```sh
+   cd epp && GOMAXPROCS=4 nice -n 15 go test -p 2 ./... && \
+     CGO_ENABLED=0 GOMAXPROCS=4 nice -n 15 go build -p 2 -ldflags="-s -w" -o <dir>/epp ./cmd/epp && cd ..
+   cp hack/Dockerfile.epp-prebuilt <dir>/Dockerfile && minikube image build -t ilo/epp-bucket-affinity:dev1 <dir>
+   kubectl apply -f hack/sim-baseline/epp-bucket-map-rbac.yaml -f hack/sim-baseline/epp-metrics-reader.yaml
+   helm upgrade router oci://ghcr.io/llm-d/charts/llm-d-router-standalone --version v1.0.0 -n ilo-sim \
+     -f hack/sim-baseline/router-values.yaml -f hack/sim-baseline/router-values-r2.yaml
+   ```
+
+   The first build downloads and compiles the router's dependencies (about 10 minutes on this machine) and, run at
+   full parallelism, starved minikube: the node went NotReady and the controller lost its leader lease and
+   restarted. Hence `nice`, `GOMAXPROCS` and `-p 2`; later builds are cached. Lint the module with
+   `../bin/golangci-lint run -j 2 --config ../.golangci.yml ./...` from `epp/`.
 5. **Measurement on GPU:** two vLLM replicas sharing the GPU; arms R0-R3 of `ARCHITECTURE.md` with the
    code-doc-assistant evaluation set and synthetic skewed workloads.
 6. **`CachePolicy`.**

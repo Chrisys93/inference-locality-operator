@@ -1,8 +1,8 @@
 # Architecture
 
 Status: design, 2026-11-19; simulator baseline (R0, R1) run 2026-11-23, see `PREP.md` step 2. Controller
-implemented and checked on the simulators 2026-11-23 (component 1); the scorer and `CachePolicy` are not written
-yet.
+(component 1) and scorer (component 2) implemented and checked on the simulators 2026-11-23; busiest-bucket
+selection, warm-up and `CachePolicy` are not written yet.
 
 ## The problem
 
@@ -92,8 +92,9 @@ Each interval the controller:
 5. publishes the map (`map.json`: version, hash name, bucket count, prefix bytes, owner per bucket, move times and
    count) in a ConfigMap owned by the policy, and patches the status.
 
-Not yet: choosing the busiest buckets to move (the logic takes per-bucket load, which only the scorer can supply),
-warming a bucket's new owner before the move is published, and the HitRate trigger.
+Not yet: choosing the busiest buckets to move (the logic takes per-bucket load; the scorer now exports it, the
+controller does not read it yet), warming a bucket's new owner before the move is published, and the HitRate
+trigger.
 
 Checked on the simulators (2026-11-23): with 20 concurrent requests sent straight to one replica (4 slots), its
 queueing delay was about 4x its service time; the controller moved 4 buckets every 30 s down to the floor
@@ -102,11 +103,29 @@ router on purpose, so the moves could not relieve it; the run is what showed the
 
 ### 2. `bucket-affinity-scorer` (EPP plugin)
 
-llm-d router v1.0.0 registers plugins in tree only (`plugin.Register` in `cmd/epp/runner/runner.go`), so the
-scorer is built into a fork of the EPP image. It hashes the request's prefix exactly as the controller does (`buckets.Key`
-over the map's `prefixBytes`, imported from this module), looks up the owner in the bucket map (watched ConfigMap) and scores the owner 1, others 0. It runs next to the stock
-`prefix-cache-scorer` and `queue-scorer` with configurable weights, so that ownership guides placement without
-overriding the queue when a replica is saturated.
+Implemented 2026-11-23 (`epp/`, a Go module of its own, so the router's dependencies stay out of the controller).
+llm-d router v1.0.0 keeps its plugins in a process-wide registry, and its `main` only runs the runner; `epp/cmd/epp`
+registers the scorer and runs the same runner, so the image is the stock EPP plus one plugin, with no fork.
+
+- **Map:** watches the one ConfigMap named in its parameters (`configMap`, `namespace`; a Role limited to that
+  name is enough) and keeps the last map that decodes and uses the same key function.
+- **Score:** takes the prompt text (completions: the prompt; chat: `role\ncontent\n` per message, in order), its
+  bucket with `buckets.Key` over the map's `prefixBytes`, and scores the owning pod 1, others 0. No map, or no text
+  prompt: everyone 0, so the other scorers decide.
+- **Counts:** on each completed response, per bucket: requests, requests served by the owner, prompt tokens,
+  cached prompt tokens (`ilo_bucket_{requests,owner_served,prompt_tokens,cached_tokens}_total{bucket}` on the EPP
+  metrics endpoint, which checks tokens). These are the per-bucket popularity the busiest-bucket selection needs.
+- **Config (arm R2):** the stock scorers plus this one, weight 3 like the prefix-cache scorer
+  (`hack/sim-baseline/router-values-r2.yaml`); the plugin is registered as Alpha, so the EPP runs with
+  `--allow-experimental-plugins`.
+
+Checked on the simulators (2026-11-23), Zipf workload, 3,000 requests, map 33/31 buckets: every request was served
+by its bucket's owner, each document stayed on one replica, 93% of prompt tokens came from cache (the scorer's
+counters and the simulators' agree), and the busiest replica took 88% of requests (R1: 54-64%), while its
+queueing delay stayed at 38% of service time, under the 200% trigger, so nothing moved. Strict ownership
+concentrates popular buckets; whether that costs latency is what the trigger watches, and what the GPU runs measure.
+Pod names are the owners, so a rolling restart of the model servers reassigns every bucket (a StatefulSet's stable
+names would not).
 
 ### 3. `CachePolicy` (second API, after the routing work is measured)
 
