@@ -26,6 +26,7 @@ REQUESTS = int(os.environ.get("REQUESTS", "1500"))
 CONCURRENCY = int(os.environ.get("CONCURRENCY", "6"))
 DOCS = int(os.environ.get("DOCS", "32"))
 DOC_WORDS = int(os.environ.get("DOC_WORDS", "300"))
+HOT_OFFSET = int(os.environ.get("HOT_OFFSET") or "0")  # zipf: document (rank + HOT_OFFSET) % DOCS is the rank-th most popular
 ZIPF_S = float(os.environ.get("ZIPF_S", "1.2"))
 MAX_TOKENS = int(os.environ.get("MAX_TOKENS", "16"))
 SEED = int(os.environ.get("SEED", "1"))
@@ -72,7 +73,7 @@ def pick_doc(rng, i):
     if WORKLOAD == "shift":
         quarter = min(3, i * 4 // REQUESTS)
         return (rank + quarter * (DOCS // 4)) % DOCS
-    return rank
+    return (rank + HOT_OFFSET) % DOCS
 
 
 def scrape():
@@ -143,7 +144,8 @@ def worker(wid):
 
 
 def main():
-    emit({"type": "start", "arm": ARM, "workload": WORKLOAD, "requests": REQUESTS, "concurrency": CONCURRENCY,
+    emit({"type": "start", "arm": ARM, "workload": WORKLOAD, "hot_offset": HOT_OFFSET, "requests": REQUESTS,
+          "concurrency": CONCURRENCY,
           "docs": DOCS, "doc_words": DOC_WORDS, "zipf_s": ZIPF_S, "seed": SEED, "target": TARGET, "t": time.time()})
     scrape()
     threads = [threading.Thread(target=worker, args=(w,)) for w in range(CONCURRENCY)]

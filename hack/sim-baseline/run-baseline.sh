@@ -30,9 +30,9 @@ log() { echo "$(date -u +%FT%TZ) $*" | tee -a "$LOG"; }
 
 declare -A TARGETS=([R0]=http://sim-plain:8000 [R1]=http://router-epp:8081)
 
-restart() {
-  kubectl -n $NS rollout restart deploy/"$1" >/dev/null &&
-    kubectl -n $NS rollout status deploy/"$1" --timeout=300s >/dev/null
+restart() {  # kind/name
+  kubectl -n $NS rollout restart "$1" >/dev/null &&
+    kubectl -n $NS rollout status "$1" --timeout=300s >/dev/null
 }
 
 snapshot() {  # pod memory and restarts
@@ -46,7 +46,7 @@ snapshot() {  # pod memory and restarts
 run_job() {  # name arm workload requests seed
   local job=$1 arm=$2 workload=$3 requests=$4 seed=$5
   kubectl -n $NS delete job "$job" --ignore-not-found >/dev/null
-  JOB=$job ARM=$arm TARGET=${TARGETS[$arm]} WORKLOAD=$workload REQUESTS=$requests CONCURRENCY=$CONCURRENCY SEED=$seed \
+  JOB=$job ARM=$arm TARGET=${TARGETS[$arm]} WORKLOAD=$workload REQUESTS=$requests CONCURRENCY=$CONCURRENCY SEED=$seed HOT_OFFSET=0 \
     envsubst < "$HERE/loadgen-job.yaml.tpl" | kubectl apply -f - >/dev/null || return 1
   if kubectl -n $NS wait --for=condition=complete job/"$job" --timeout=$JOB_TIMEOUT >/dev/null; then
     kubectl -n $NS logs job/"$job" > "$OUT/$job.jsonl"
@@ -76,7 +76,7 @@ for rep in $(seq 1 "$REPEATS"); do
     if (( rep % 2 )); then arms="R0 R1"; else arms="R1 R0"; fi
     for arm in $arms; do
       job=$(echo "p-$arm-$wl-$rep" | tr 'A-Z' 'a-z')
-      restart sim && restart router-epp || { log "restart failed before $job"; fail_check; continue; }
+      restart statefulset/sim && restart deploy/router-epp || { log "restart failed before $job"; fail_check; continue; }
       run_job "$job" "$arm" "$wl" "$REQUESTS" "$rep" || fail_check
     done
   done
@@ -84,7 +84,7 @@ for rep in $(seq 1 "$REPEATS"); do
 done
 
 log "soak: R1 shift, $SOAK_CHUNKS chunks of $SOAK_REQUESTS"
-restart sim && restart router-epp || log "restart failed before soak"
+restart statefulset/sim && restart deploy/router-epp || log "restart failed before soak"
 for c in $(seq 1 "$SOAK_CHUNKS"); do
   run_job "soak-$c" R1 shift "$SOAK_REQUESTS" "$((100 + c))" || fail_check
   snapshot "after soak chunk $c"

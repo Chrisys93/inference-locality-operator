@@ -21,3 +21,7 @@ spec:
     interval: 30s
     maxMovesPerInterval: 4
     cooldown: 2m
+  scorerMetrics:             # bucket-affinity-scorer's per-bucket counters: busiest buckets move first
+    service: router-epp      # the EPP's Service in this namespace
+    port: 9090
+    auth: ServiceAccountToken  # the EPP checks tokens on its metrics endpoint

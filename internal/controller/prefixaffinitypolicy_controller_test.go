@@ -20,6 +20,8 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -72,14 +74,46 @@ func (f *fakeScraper) serve(ip string, n int, queueSec, serviceSec float64) {
 	f.vals[ip][metrics.QueueTimeSum] += float64(n) * queueSec
 }
 
+// fakeBuckets returns cumulative per-bucket counters and records the token it was sent.
+type fakeBuckets struct {
+	mu     sync.Mutex
+	counts map[int]metrics.BucketCounts
+	url    string
+	bearer string
+}
+
+func (f *fakeBuckets) ScrapeBuckets(_ context.Context, url, bearer string) (map[int]metrics.BucketCounts, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.url, f.bearer = url, bearer
+	out := map[int]metrics.BucketCounts{}
+	maps.Copy(out, f.counts)
+	return out, nil
+}
+
+func (f *fakeBuckets) add(bucket int, requests float64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.counts == nil {
+		f.counts = map[int]metrics.BucketCounts{}
+	}
+	c := f.counts[bucket]
+	c.Requests += requests
+	c.OwnerServed += requests
+	c.PromptTokens += 100 * requests
+	c.CachedTokens += 90 * requests
+	f.counts[bucket] = c
+}
+
 var _ = Describe("PrefixAffinityPolicy Controller", func() {
 	const ns = "default"
 	ctx := context.Background()
 
 	var (
-		scraper *fakeScraper
-		clock   time.Time
-		rec     *PrefixAffinityPolicyReconciler
+		scraper       *fakeScraper
+		bucketScraper *fakeBuckets
+		clock         time.Time
+		rec           *PrefixAffinityPolicyReconciler
 	)
 
 	makePod := func(name, app, ip string) {
@@ -140,11 +174,16 @@ var _ = Describe("PrefixAffinityPolicy Controller", func() {
 	BeforeEach(func() {
 		scraper = &fakeScraper{fail: map[string]bool{}}
 		clock = time.Unix(1_000_000, 0)
+		bucketScraper = &fakeBuckets{}
+		tokenFile := filepath.Join(GinkgoT().TempDir(), "token")
+		Expect(os.WriteFile(tokenFile, []byte("test-token\n"), 0o600)).To(Succeed())
 		rec = &PrefixAffinityPolicyReconciler{
-			Client:  k8sClient,
-			Scheme:  k8sClient.Scheme(),
-			Scraper: scraper,
-			Now:     func() time.Time { return clock },
+			Client:        k8sClient,
+			Scheme:        k8sClient.Scheme(),
+			Scraper:       scraper,
+			BucketScraper: bucketScraper,
+			TokenFile:     tokenFile,
+			Now:           func() time.Time { return clock },
 		}
 	})
 
@@ -235,6 +274,109 @@ var _ = Describe("PrefixAffinityPolicy Controller", func() {
 		Expect(p.Status.TotalMoves).To(BeZero())
 		Expect(p.Status.LastRebalanceTime).To(BeNil())
 		Expect(getMap(key).Counts()["b1"]).To(Equal(before["b1"]))
+	})
+
+	It("moves the busiest bucket that fits, using the scorer's counters", func() {
+		makePod("s1", "pool-s", "10.0.5.1")
+		makePod("s2", "pool-s", "10.0.5.2")
+		svc := &corev1.Service{Name: "epp", Namespace: ns,
+			Spec: corev1.ServiceSpec{Ports: []corev1.ServicePort{{Name: "metrics", Port: 9090}}}}
+		Expect(k8sClient.Create(ctx, svc)).To(Succeed())
+		key := makePolicy("by-load", "pool-s")
+		p := getPolicy(key)
+		p.Spec.ScorerMetrics = &routingv1alpha1.ScorerMetricsSpec{Service: "epp",
+			Auth: routingv1alpha1.ScorerAuthServiceAccountToken}
+		Expect(k8sClient.Update(ctx, p)).To(Succeed())
+		t0 := clock
+		reconcileAt(key, t0)
+		m := getMap(key)
+		var hot []int
+		for b, o := range m.Owners {
+			if o == "s1" {
+				hot = append(hot, b)
+			}
+		}
+		// s1: one dominant bucket (300), one of 60, one of 20; s2 idle
+		bucketScraper.add(hot[0], 300)
+		bucketScraper.add(hot[1], 60)
+		bucketScraper.add(hot[2], 20)
+		scraper.serve("10.0.5.1", 380, 1.0, 0.2)
+		scraper.serve("10.0.5.2", 20, 0.0, 0.2)
+		reconcileAt(key, t0.Add(30*time.Second))
+
+		// 300 would leave s2 busier than s1 (300 vs 80): it stays; 60 and 20 move
+		after := getMap(key)
+		Expect(after.Owners[hot[0]]).To(Equal("s1"))
+		Expect(after.Owners[hot[1]]).To(Equal("s2"))
+		Expect(after.Owners[hot[2]]).To(Equal("s2"))
+		Expect(after.Moves).To(Equal(int64(2)))
+		Expect(bucketScraper.url).To(Equal("http://epp.default.svc:9090/metrics"))
+		Expect(bucketScraper.bearer).To(Equal("test-token"))
+
+		st := getPolicy(key).Status
+		Expect(st.ScorerMetricsError).To(BeEmpty())
+		Expect(st.BusiestBuckets).To(HaveLen(3))
+		Expect(st.BusiestBuckets[0]).To(Equal(routingv1alpha1.BucketStatus{
+			Bucket: int32(hot[0]), Owner: "s1", Requests: 300, CachedPercent: 90, OwnerServedPercent: 100}))
+		Expect(st.BusiestBuckets[1].Owner).To(Equal("s2"))
+	})
+
+	It("waits for per-bucket counts rather than move blind", func() {
+		makePod("w1", "pool-w", "10.0.7.1")
+		makePod("w2", "pool-w", "10.0.7.2")
+		key := makePolicy("wait-counts", "pool-w")
+		t0 := clock
+		reconcileAt(key, t0) // first reading, without scorerMetrics
+
+		svc := &corev1.Service{Name: "epp-w", Namespace: ns,
+			Spec: corev1.ServiceSpec{Ports: []corev1.ServicePort{{Name: "metrics", Port: 9090}}}}
+		Expect(k8sClient.Create(ctx, svc)).To(Succeed())
+		p := getPolicy(key)
+		p.Spec.ScorerMetrics = &routingv1alpha1.ScorerMetricsSpec{Service: "epp-w"}
+		Expect(k8sClient.Update(ctx, p)).To(Succeed())
+
+		// overloaded, but the scorer has been read only once: no difference to take yet, so nothing moves
+		scraper.serve("10.0.7.1", 100, 1.0, 0.2)
+		scraper.serve("10.0.7.2", 100, 0.0, 0.2)
+		reconcileAt(key, t0.Add(30*time.Second))
+		Expect(getMap(key).Moves).To(BeZero())
+		Expect(bucketScraper.bearer).To(BeEmpty()) // auth None
+
+		// next interval: counts are there, the busy bucket moves
+		var hot int
+		for b, o := range getMap(key).Owners {
+			if o == "w1" {
+				hot = b
+				break
+			}
+		}
+		bucketScraper.add(hot, 30)
+		for b, o := range getMap(key).Owners {
+			if o == "w1" && b != hot {
+				bucketScraper.add(b, 60)
+				break
+			}
+		}
+		scraper.serve("10.0.7.1", 100, 1.0, 0.2)
+		scraper.serve("10.0.7.2", 100, 0.0, 0.2)
+		reconcileAt(key, t0.Add(60*time.Second))
+		Expect(getMap(key).Moves).To(Equal(int64(1)))
+		Expect(getMap(key).Owners[hot]).To(Equal("w2"))
+	})
+
+	It("does not send its token to an ExternalName service", func() {
+		makePod("x1", "pool-x", "10.0.6.1")
+		svc := &corev1.Service{Name: "outside", Namespace: ns,
+			Spec: corev1.ServiceSpec{Type: corev1.ServiceTypeExternalName, ExternalName: "example.org"}}
+		Expect(k8sClient.Create(ctx, svc)).To(Succeed())
+		key := makePolicy("external", "pool-x")
+		p := getPolicy(key)
+		p.Spec.ScorerMetrics = &routingv1alpha1.ScorerMetricsSpec{Service: "outside",
+			Auth: routingv1alpha1.ScorerAuthServiceAccountToken}
+		Expect(k8sClient.Update(ctx, p)).To(Succeed())
+		reconcileAt(key, clock)
+		Expect(getPolicy(key).Status.ScorerMetricsError).To(ContainSubstring("ExternalName"))
+		Expect(bucketScraper.bearer).To(BeEmpty())
 	})
 
 	It("does not judge a replica whose metrics cannot be read", func() {

@@ -84,3 +84,42 @@ func TestHTTPScraper(t *testing.T) {
 		t.Fatal("404 accepted")
 	}
 }
+
+func TestParseAndDiffBuckets(t *testing.T) {
+	text := `# HELP ilo_bucket_requests_total Completed requests per prefix bucket.
+# TYPE ilo_bucket_requests_total counter
+ilo_bucket_requests_total{bucket="3"} 10
+ilo_bucket_requests_total{bucket="7"} 4
+ilo_bucket_owner_served_total{bucket="3"} 9
+ilo_bucket_prompt_tokens_total{bucket="3"} 1000
+ilo_bucket_cached_tokens_total{bucket="3"} 800
+ilo_bucket_other_total{bucket="3"} 99
+go_goroutines 12
+`
+	prev, err := ParseBuckets(strings.NewReader(text))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prev[3] != (BucketCounts{Requests: 10, OwnerServed: 9, PromptTokens: 1000, CachedTokens: 800}) || prev[7].Requests != 4 {
+		t.Fatalf("parsed %+v", prev)
+	}
+	cur := map[int]BucketCounts{
+		3: {Requests: 25, OwnerServed: 24, PromptTokens: 2500, CachedTokens: 2000},
+		7: {Requests: 4},
+		9: {Requests: 2, PromptTokens: 200},
+	}
+	d := DiffBuckets(prev, cur)
+	if d[3] != (BucketCounts{Requests: 15, OwnerServed: 15, PromptTokens: 1500, CachedTokens: 1200}) {
+		t.Fatalf("bucket 3: %+v", d[3])
+	}
+	if _, ok := d[7]; ok {
+		t.Fatal("idle bucket reported")
+	}
+	if d[9].Requests != 2 {
+		t.Fatalf("new bucket: %+v", d[9])
+	}
+	// counters reset (EPP restarted)
+	if r := DiffBuckets(cur, map[int]BucketCounts{3: {Requests: 5}}); r[3].Requests != 5 {
+		t.Fatalf("after reset: %+v", r[3])
+	}
+}

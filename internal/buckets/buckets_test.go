@@ -182,25 +182,68 @@ func TestRebalanceStopsAtTheFloor(t *testing.T) {
 	}
 }
 
-func TestRebalancePrefersBusiestBuckets(t *testing.T) {
-	m, _ := Assign(nil, []string{"a", "b"}, 32, 2048)
-	load := map[int]float64{}
-	var busiest int
-	for b, o := range m.Owners {
-		if o == "a" {
-			load[b] = 1
-			busiest = b
+var hotA = []Load{
+	{Name: "a", OK: true, Requests: 100, MeanQueueSec: 1, MeanServiceSec: 0.2},
+	{Name: "b", OK: true, Requests: 100, MeanServiceSec: 0.2},
+}
+
+// owned returns the buckets of m owned by o, in index order.
+func owned(m *Map, o string) []int {
+	var out []int
+	for b, x := range m.Owners {
+		if x == o {
+			out = append(out, b)
 		}
 	}
-	load[busiest] = 50
+	return out
+}
+
+func TestRebalanceByLoadMovesTheBusiestThatFits(t *testing.T) {
+	m, _ := Assign(nil, []string{"a", "b"}, 32, 2048)
+	as, bs := owned(m, "a"), owned(m, "b")
+	load := map[int]float64{as[0]: 50, as[1]: 30, as[2]: 10, as[3]: 5, bs[0]: 10}
+	// expected: a 95, b 10. Moving 50 leaves a 45, b 60: b would be busier, so 50 stays.
+	// 30 moves (a 65, b 40), then 10 (a 55, b 50); 5 would leave b at 55 > a at 50: stays.
 	c := qcfg
-	c.MaxMoves = 1
-	moves := Rebalance(m, []Load{
-		{Name: "a", OK: true, Requests: 100, MeanQueueSec: 1, MeanServiceSec: 0.2},
-		{Name: "b", OK: true, Requests: 100, MeanServiceSec: 0.2},
-	}, c, time.Unix(0, 0), load)
-	if len(moves) != 1 || moves[0].Bucket != busiest {
-		t.Fatalf("moves %+v, busiest %d", moves, busiest)
+	c.MaxMoves = 10
+	moves := Rebalance(m, hotA, c, time.Unix(0, 0), load)
+	got := make([]int, 0, len(moves))
+	for _, mv := range moves {
+		if mv.From != "a" || mv.To != "b" {
+			t.Fatalf("bad move %+v", mv)
+		}
+		got = append(got, mv.Bucket)
+	}
+	if len(got) != 2 || got[0] != as[1] || got[1] != as[2] {
+		t.Fatalf("moved %v, want %v then %v", got, as[1], as[2])
+	}
+}
+
+func TestRebalanceByLoadLeavesADominantBucket(t *testing.T) {
+	m, _ := Assign(nil, []string{"a", "b"}, 16, 2048)
+	as := owned(m, "a")
+	load := map[int]float64{as[0]: 100, as[1]: 1}
+	c := qcfg
+	c.MaxMoves = 10
+	moves := Rebalance(m, hotA, c, time.Unix(0, 0), load)
+	// 100 cannot move (b would carry it all); the bucket with 1 request moves (a 100, b 1)
+	if len(moves) != 1 || moves[0].Bucket != as[1] {
+		t.Fatalf("moves %+v", moves)
+	}
+}
+
+func TestRebalanceByLoadSpreadsOverTargets(t *testing.T) {
+	m, _ := Assign(nil, []string{"a", "b", "c"}, 48, 2048)
+	as := owned(m, "a")
+	load := map[int]float64{as[0]: 40, as[1]: 40, as[2]: 20}
+	loads := append([]Load{}, hotA...)
+	loads = append(loads, Load{Name: "c", OK: true, Requests: 100, MeanServiceSec: 0.2})
+	c := qcfg
+	c.MaxMoves = 10
+	moves := Rebalance(m, loads, c, time.Unix(0, 0), load)
+	// a 100, b 0, c 0: 40 -> b (60/40/0), 40 -> c (20/40/40); 20 would leave its target at 60 > 0: stays
+	if len(moves) != 2 || moves[0].To == moves[1].To {
+		t.Fatalf("moves %+v", moves)
 	}
 }
 

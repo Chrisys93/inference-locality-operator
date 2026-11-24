@@ -22,6 +22,7 @@ spec:
             - { name: REQUESTS, value: "${REQUESTS}" }
             - { name: CONCURRENCY, value: "${CONCURRENCY}" }
             - { name: SEED, value: "${SEED}" }
+            - { name: HOT_OFFSET, value: "${HOT_OFFSET}" }
           volumeMounts:
             - { name: app, mountPath: /app }
           resources:

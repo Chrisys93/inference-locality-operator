@@ -1,0 +1,17 @@
+# Lets the controller read metrics endpoints that check tokens (the llm-d EPP's, for the scorer's per-bucket
+# counters), when a policy sets scorerMetrics.auth: ServiceAccountToken.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/name: inference-locality-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: metrics-reader-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: metrics-reader
+subjects:
+- kind: ServiceAccount
+  name: controller-manager
+  namespace: system

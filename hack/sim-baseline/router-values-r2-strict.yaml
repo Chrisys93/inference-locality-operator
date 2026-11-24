@@ -1,0 +1,51 @@
+# Arm R2 strict: as router-values-r2.yaml (apply on top of router-values.yaml instead of it), with the bucket scorer's
+# weight at 10. The other scorers together can give a non-owner at most 7 (queue 2, KV-cache use 2, prefix cache 3),
+# so a request goes to its bucket's owner: overload is left to the controller's rebalancing, as in ReStorEdge,
+# instead of being absorbed by spilling to other replicas (which R2 at weight 3 does under load).
+# The router's saturation filter (utilization-detector, added to every profile by default) removes a replica with 5
+# or more waiting requests or KV-cache use of 80% or more before scoring, whatever the weights; with 4 slots per
+# simulator the owner of the popular buckets is filtered out almost at once. Here it stays as a last resort only:
+# 64 waiting requests, or a KV cache over 100% (+10% headroom, so never on the simulators).
+router:
+  epp:
+    image:
+      registry: ilo
+      repository: epp-bucket-affinity
+      tag: dev1
+      pullPolicy: IfNotPresent
+    flags:
+      allow-experimental-plugins: true   # the scorer is registered as Alpha
+    pluginsConfigFile: bucket-affinity.yaml
+    pluginsCustomConfig:
+      bucket-affinity.yaml: |
+        apiVersion: llm-d.ai/v1
+        kind: EndpointPickerConfig
+        plugins:
+        - type: queue-scorer
+        - type: kv-cache-utilization-scorer
+        - type: prefix-cache-scorer
+        - type: bucket-affinity-scorer
+          parameters:
+            configMap: sim-pool-bucket-map
+        - type: metrics-data-source
+          parameters:
+            scheme: "http"
+            path: "/metrics"
+            insecureSkipVerify: true
+        - type: core-metrics-extractor
+        - type: utilization-detector
+          parameters:
+            queueDepthThreshold: 64
+            kvCacheUtilThreshold: 1.0
+            headroom: 0.1
+        schedulingProfiles:
+        - name: default
+          plugins:
+          - pluginRef: queue-scorer
+            weight: 2
+          - pluginRef: kv-cache-utilization-scorer
+            weight: 2
+          - pluginRef: prefix-cache-scorer
+            weight: 3
+          - pluginRef: bucket-affinity-scorer
+            weight: 10

@@ -114,6 +114,36 @@ spec:
                     minimum: 0
                     type: integer
                 type: object
+              scorerMetrics:
+                description: |-
+                  scorerMetrics, when set, gives the per-bucket request counts the scorer exports. Rebalancing then moves an
+                  overloaded replica's busiest buckets first, and only while a move leaves the target less loaded than the
+                  source (expected loads updated after each move). Without it, buckets move in index order.
+                properties:
+                  auth:
+                    default: None
+                    description: 'auth: None, or ServiceAccountToken to send the controller''s
+                      token.'
+                    enum:
+                    - None
+                    - ServiceAccountToken
+                    type: string
+                  path:
+                    default: /metrics
+                    description: path of the metrics endpoint.
+                    type: string
+                  port:
+                    default: 9090
+                    description: port of the metrics endpoint on that Service.
+                    format: int32
+                    type: integer
+                  service:
+                    description: service is the name of the EPP's Service, in the
+                      policy's namespace.
+                    type: string
+                required:
+                - service
+                type: object
               selector:
                 description: |-
                   selector picks the model-server pods (in the policy's namespace) whose prefix space is shared out; normally
@@ -207,6 +237,44 @@ spec:
                 description: bucketMap is the name of the ConfigMap holding the bucket-to-replica
                   map.
                 type: string
+              busiestBuckets:
+                description: |-
+                  busiestBuckets are the buckets with the most requests in the last interval (at most 8), when the scorer's
+                  counters are read.
+                items:
+                  description: BucketStatus is one bucket's traffic in the last interval,
+                    from the scorer's counters.
+                  properties:
+                    bucket:
+                      description: bucket index.
+                      format: int32
+                      type: integer
+                    cachedPercent:
+                      description: cachedPercent is the share of the bucket's prompt
+                        tokens served from the prefix cache.
+                      format: int32
+                      type: integer
+                    owner:
+                      description: owner is the pod owning the bucket after this interval's
+                        moves.
+                      type: string
+                    ownerServedPercent:
+                      description: ownerServedPercent is the share of the bucket's
+                        requests served by its owner.
+                      format: int32
+                      type: integer
+                    requests:
+                      description: requests completed in the last interval.
+                      format: int64
+                      type: integer
+                  required:
+                  - bucket
+                  - cachedPercent
+                  - owner
+                  - ownerServedPercent
+                  - requests
+                  type: object
+                type: array
               conditions:
                 description: 'conditions: "Ready" is true when a map covering every
                   bucket has been published.'
@@ -331,6 +399,10 @@ spec:
                   - requests
                   type: object
                 type: array
+              scorerMetricsError:
+                description: scorerMetricsError is set when the scorer's counters
+                  could not be read.
+                type: string
               totalMoves:
                 description: totalMoves counts the buckets moved by the trigger since
                   the policy was created.

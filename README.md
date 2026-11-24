@@ -11,7 +11,7 @@ delete on expiry). See [ARCHITECTURE.md](ARCHITECTURE.md) for the design and the
 the environment and order of work. The workload and evaluation come from
 [code-doc-assistant](https://github.com/Chrisys93/code-doc-assistant).
 
-**Status (2026-11-23):** simulator baseline run; `PrefixAffinityPolicy` controller and `bucket-affinity-scorer` (EPP plugin, `epp/`) implemented and checked on the simulators. Next: moving the busiest buckets, using the scorer's per-bucket counts, and warming a bucket's new owner.
+**Status (2026-11-24):** simulator baseline run; `PrefixAffinityPolicy` controller and `bucket-affinity-scorer` (EPP plugin, `epp/`) implemented; rebalancing moves the busiest buckets using the scorer's counts, compared with index-order moves on the simulators. Next: warming a bucket's new owner, then the GPU measurement.
 
 ## Getting Started
 

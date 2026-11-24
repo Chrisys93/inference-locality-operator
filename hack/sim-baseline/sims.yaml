@@ -6,13 +6,17 @@ kind: Namespace
 metadata:
   name: ilo-sim
 ---
+# A StatefulSet, so the pods keep their names (sim-0, sim-1) across restarts: the bucket map is keyed by pod name,
+# so a run that starts from fresh caches also starts from the same map.
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: sim
   namespace: ilo-sim
 spec:
   replicas: 2
+  serviceName: sim-direct
+  podManagementPolicy: Parallel
   selector:
     matchLabels:
       app: sim-pool

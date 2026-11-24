@@ -87,6 +87,23 @@ make manifests generate build test lint
    full parallelism, starved minikube: the node went NotReady and the controller lost its leader lease and
    restarted. Hence `nice`, `GOMAXPROCS` and `-p 2`; later builds are cached. Lint the module with
    `../bin/golangci-lint run -j 2 --config ../.golangci.yml ./...` from `epp/`.
+   **Busiest-bucket rebalancing** (done 2026-11-24): the controller reads the scorer's counters
+   (`spec.scorerMetrics`, through the EPP's Service, with its service-account token) and moves the busiest
+   buckets that fit (see `ARCHITECTURE.md`, component 1). Compared with index-order moves in run rebalance-004:
+
+   ```sh
+   kubectl apply -f hack/sim-baseline/sims.yaml          # StatefulSet sim-0, sim-1
+   helm upgrade router oci://ghcr.io/llm-d/charts/llm-d-router-standalone --version v1.0.0 -n ilo-sim \
+     -f hack/sim-baseline/router-values.yaml -f hack/sim-baseline/router-values-r2-strict.yaml
+   hack/sim-baseline/run-rebalance.sh results/rebalance-004     # ~45 min: offsets 1 and 8, two runs per arm
+   python3 -I hack/sim-baseline/analyze-rebalance.py results/rebalance-004
+   ```
+
+   Do not edit a script while it runs (bash reads it as it goes); the runs above used a copy. Before that,
+   runs rebalance-001 to -003 found the three conditions the comparison needs: a start map that does not depend on
+   random pod names (StatefulSet), a start that is actually skewed (`HOT_OFFSET`), and routing that follows the
+   map under load (R2s; R2 spills, see component 2). Leader election uses longer leases (60 s / 45 s), since this
+   single-node API server stalls for seconds at times and the 15 s default restarted the controller twice.
 5. **Measurement on GPU:** two vLLM replicas sharing the GPU; arms R0-R3 of `ARCHITECTURE.md` with the
    code-doc-assistant evaluation set and synthetic skewed workloads.
 6. **`CachePolicy`.**

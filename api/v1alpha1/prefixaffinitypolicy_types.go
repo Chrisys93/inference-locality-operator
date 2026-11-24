@@ -100,6 +100,41 @@ type RebalanceSpec struct {
 	Cooldown metav1.Duration `json:"cooldown,omitempty"`
 }
 
+// ScorerAuth selects how the controller authenticates to the scorer's metrics endpoint.
+// +kubebuilder:validation:Enum=None;ServiceAccountToken
+type ScorerAuth string
+
+const (
+	// ScorerAuthNone sends no credentials.
+	ScorerAuthNone ScorerAuth = "None"
+	// ScorerAuthServiceAccountToken sends the controller's service-account token (the llm-d EPP checks tokens on
+	// its metrics endpoint by default). Only sent to a Service in the cluster, never to an ExternalName Service.
+	ScorerAuthServiceAccountToken ScorerAuth = "ServiceAccountToken"
+)
+
+// ScorerMetricsSpec locates the bucket-affinity-scorer's per-bucket counters: the metrics endpoint of the EPP that
+// routes this pool, reached through a Service in the policy's namespace.
+type ScorerMetricsSpec struct {
+	// service is the name of the EPP's Service, in the policy's namespace.
+	// +required
+	Service string `json:"service"`
+
+	// port of the metrics endpoint on that Service.
+	// +kubebuilder:default=9090
+	// +optional
+	Port int32 `json:"port,omitempty"`
+
+	// path of the metrics endpoint.
+	// +kubebuilder:default="/metrics"
+	// +optional
+	Path string `json:"path,omitempty"`
+
+	// auth: None, or ServiceAccountToken to send the controller's token.
+	// +kubebuilder:default=None
+	// +optional
+	Auth ScorerAuth `json:"auth,omitempty"`
+}
+
 // PrefixAffinityPolicySpec defines the desired state of PrefixAffinityPolicy.
 type PrefixAffinityPolicySpec struct {
 	// selector picks the model-server pods (in the policy's namespace) whose prefix space is shared out; normally
@@ -132,6 +167,26 @@ type PrefixAffinityPolicySpec struct {
 
 	// +optional
 	Rebalance RebalanceSpec `json:"rebalance,omitempty"`
+
+	// scorerMetrics, when set, gives the per-bucket request counts the scorer exports. Rebalancing then moves an
+	// overloaded replica's busiest buckets first, and only while a move leaves the target less loaded than the
+	// source (expected loads updated after each move). Without it, buckets move in index order.
+	// +optional
+	ScorerMetrics *ScorerMetricsSpec `json:"scorerMetrics,omitempty"`
+}
+
+// BucketStatus is one bucket's traffic in the last interval, from the scorer's counters.
+type BucketStatus struct {
+	// bucket index.
+	Bucket int32 `json:"bucket"`
+	// owner is the pod owning the bucket after this interval's moves.
+	Owner string `json:"owner"`
+	// requests completed in the last interval.
+	Requests int64 `json:"requests"`
+	// cachedPercent is the share of the bucket's prompt tokens served from the prefix cache.
+	CachedPercent int32 `json:"cachedPercent"`
+	// ownerServedPercent is the share of the bucket's requests served by its owner.
+	OwnerServedPercent int32 `json:"ownerServedPercent"`
 }
 
 // ReplicaStatus is what the controller saw of one replica in the last interval.
@@ -180,6 +235,15 @@ type PrefixAffinityPolicyStatus struct {
 	// totalMoves counts the buckets moved by the trigger since the policy was created.
 	// +optional
 	TotalMoves int64 `json:"totalMoves,omitempty"`
+
+	// busiestBuckets are the buckets with the most requests in the last interval (at most 8), when the scorer's
+	// counters are read.
+	// +optional
+	BusiestBuckets []BucketStatus `json:"busiestBuckets,omitempty"`
+
+	// scorerMetricsError is set when the scorer's counters could not be read.
+	// +optional
+	ScorerMetricsError string `json:"scorerMetricsError,omitempty"`
 
 	// conditions: "Ready" is true when a map covering every bucket has been published.
 	// +listType=map

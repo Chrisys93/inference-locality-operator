@@ -17,8 +17,10 @@ limitations under the License.
 package controller
 
 import (
+	"cmp"
 	"context"
 	"fmt"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -58,14 +60,34 @@ const (
 // observation is the controller's memory of one policy between intervals.
 type observation struct {
 	at      time.Time
-	samples map[string]metrics.Sample // pod name -> last reading
+	samples map[string]metrics.Sample    // pod name -> last reading
+	buckets map[int]metrics.BucketCounts // last reading of the scorer's counters, nil if none
 }
+
+// reading is what one interval's metrics showed.
+type reading struct {
+	loads    []buckets.Load
+	statuses []routingv1alpha1.ReplicaStatus
+	// perBucket holds each bucket's counts over the interval, nil when the scorer's counters are not read
+	perBucket map[int]metrics.BucketCounts
+	scorerErr string
+}
+
+// DefaultTokenFile is where a pod's service-account token is mounted.
+const DefaultTokenFile = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+
+// busiestShown is the number of buckets reported in status.busiestBuckets.
+const busiestShown = 8
 
 // PrefixAffinityPolicyReconciler reconciles a PrefixAffinityPolicy object.
 type PrefixAffinityPolicyReconciler struct {
 	client.Client
 	Scheme  *runtime.Scheme
 	Scraper metrics.Scraper
+	// BucketScraper reads the scorer's per-bucket counters (spec.scorerMetrics); nil disables them.
+	BucketScraper metrics.BucketScraper
+	// TokenFile holds the token sent with auth ServiceAccountToken; empty means DefaultTokenFile.
+	TokenFile string
 	// Now returns the current time; tests replace it.
 	Now func() time.Time
 
@@ -78,6 +100,7 @@ type PrefixAffinityPolicyReconciler struct {
 // +kubebuilder:rbac:groups=routing.chrisys93.github.io,resources=prefixaffinitypolicies/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch
 
 // Reconcile reads the replicas' metrics once per interval, keeps the bucket map in step with the replicas, moves
 // buckets away from replicas the trigger marks as overloaded, publishes the map and reports what it saw.
@@ -107,7 +130,7 @@ func (r *PrefixAffinityPolicyReconciler) Reconcile(ctx context.Context, req ctrl
 
 	// Metrics: read only when an interval has passed, so reconciles caused by pod or map events do not shorten
 	// the measurement window.
-	loads, statuses, measured := r.observe(ctx, req.NamespacedName, replicas, spec, now)
+	rd, measured := r.observe(ctx, &policy, replicas, spec, now)
 
 	// Map: start from the published one, follow replica changes, then rebalance.
 	cm := &corev1.ConfigMap{Name: policy.Name + "-bucket-map", Namespace: policy.Namespace}
@@ -127,10 +150,33 @@ func (r *PrefixAffinityPolicyReconciler) Reconcile(ctx context.Context, req ctrl
 	if measured && len(names) > 1 {
 		cfg := triggerConfig(spec)
 		cfg.MinBuckets = minBuckets(int(spec.Buckets), len(names), int(*spec.Rebalance.MinSharePercent))
-		moves := buckets.Rebalance(m, loads, cfg, now, nil)
+		var bucketLoad map[int]float64
+		if rd.perBucket != nil {
+			bucketLoad = map[int]float64{}
+			for b, c := range rd.perBucket {
+				if b < len(m.Owners) {
+					bucketLoad[b] = c.Requests
+				}
+			}
+		}
+		var moves []buckets.Move
+		switch {
+		case spec.ScorerMetrics != nil && bucketLoad == nil:
+			// the policy asks for moves chosen by load, and there are no counts for this interval yet (first
+			// reading, or the scorer could not be read): wait rather than move blind
+			if anyOverloaded(cfg, rd.loads) {
+				log.Info("overloaded, waiting for the scorer's per-bucket counts", "error", rd.scorerErr)
+			}
+		default:
+			moves = buckets.Rebalance(m, rd.loads, cfg, now, bucketLoad)
+		}
+		if len(moves) == 0 && bucketLoad != nil && anyOverloaded(cfg, rd.loads) {
+			log.Info("overloaded, but no bucket can move without leaving its target busier than its source")
+		}
 		if len(moves) > 0 {
 			for _, mv := range moves {
-				log.Info("bucket moved", "bucket", mv.Bucket, "from", mv.From, "to", mv.To, "mapVersion", m.Version)
+				log.Info("bucket moved", "bucket", mv.Bucket, "from", mv.From, "to", mv.To,
+					"requests", bucketLoad[mv.Bucket], "mapVersion", m.Version)
 			}
 		}
 	}
@@ -151,10 +197,12 @@ func (r *PrefixAffinityPolicyReconciler) Reconcile(ctx context.Context, req ctrl
 	}
 	counts := m.Counts()
 	if measured {
-		for i := range statuses {
-			statuses[i].Buckets = int32(counts[statuses[i].Name])
+		for i := range rd.statuses {
+			rd.statuses[i].Buckets = int32(counts[rd.statuses[i].Name])
 		}
-		status.Replicas = statuses
+		status.Replicas = rd.statuses
+		status.BusiestBuckets = busiest(rd.perBucket, m)
+		status.ScorerMetricsError = rd.scorerErr
 	} else if !sameNames(status.Replicas, names) {
 		status.Replicas = nil
 		for _, n := range names {
@@ -240,10 +288,12 @@ func podReady(p *corev1.Pod) bool {
 	return false
 }
 
-// observe reads every replica's metrics if an interval has passed since the last reading. measured is true when
-// it did; loads then carry figures for the replicas that had a previous reading.
-func (r *PrefixAffinityPolicyReconciler) observe(ctx context.Context, key types.NamespacedName, pods []corev1.Pod,
-	spec routingv1alpha1.PrefixAffinityPolicySpec, now time.Time) ([]buckets.Load, []routingv1alpha1.ReplicaStatus, bool) {
+// observe reads every replica's metrics, and the scorer's counters when configured, if an interval has passed
+// since the last reading. measured is true when it did; loads then carry figures for the replicas that had a
+// previous reading, and perBucket the buckets' counts over the interval if both readings of the scorer succeeded.
+func (r *PrefixAffinityPolicyReconciler) observe(ctx context.Context, p *routingv1alpha1.PrefixAffinityPolicy,
+	pods []corev1.Pod, spec routingv1alpha1.PrefixAffinityPolicySpec, now time.Time) (reading, bool) {
+	key := client.ObjectKeyFromObject(p)
 	r.mu.Lock()
 	if r.seen == nil {
 		r.seen = map[types.NamespacedName]*observation{}
@@ -252,13 +302,15 @@ func (r *PrefixAffinityPolicyReconciler) observe(ctx context.Context, key types.
 	r.mu.Unlock()
 	// a small tolerance, so a requeue that fires a little early still counts as due
 	if prev != nil && now.Sub(prev.at) < spec.Rebalance.Interval.Duration*9/10 {
-		return nil, nil, false
+		return reading{}, false
 	}
 
 	cfg := triggerConfig(spec)
 	cur := &observation{at: now, samples: map[string]metrics.Sample{}}
-	loads := make([]buckets.Load, 0, len(pods))
-	statuses := make([]routingv1alpha1.ReplicaStatus, 0, len(pods))
+	rd := reading{
+		loads:    make([]buckets.Load, 0, len(pods)),
+		statuses: make([]routingv1alpha1.ReplicaStatus, 0, len(pods)),
+	}
 	for _, p := range pods {
 		url := fmt.Sprintf("http://%s:%d%s", p.Status.PodIP, spec.MetricsPort, spec.MetricsPath)
 		st := routingv1alpha1.ReplicaStatus{Name: p.Name}
@@ -289,13 +341,96 @@ func (r *PrefixAffinityPolicyReconciler) observe(ctx context.Context, key types.
 			}
 		}
 		st.Overloaded = cfg.Overloaded(l)
-		loads = append(loads, l)
-		statuses = append(statuses, st)
+		rd.loads = append(rd.loads, l)
+		rd.statuses = append(rd.statuses, st)
 	}
+
+	if spec.ScorerMetrics != nil {
+		counts, err := r.scrapeScorer(ctx, p.Namespace, spec.ScorerMetrics)
+		if err != nil {
+			rd.scorerErr = err.Error()
+		} else {
+			cur.buckets = counts
+			if prev != nil && prev.buckets != nil {
+				rd.perBucket = metrics.DiffBuckets(prev.buckets, counts)
+			}
+		}
+	}
+
 	r.mu.Lock()
 	r.seen[key] = cur
 	r.mu.Unlock()
-	return loads, statuses, true
+	return rd, true
+}
+
+// scrapeScorer reads the scorer's counters through the named Service, sending the controller's token if asked to.
+// The token goes only to a Service resolved inside the cluster, never to an ExternalName Service.
+func (r *PrefixAffinityPolicyReconciler) scrapeScorer(ctx context.Context, namespace string,
+	sm *routingv1alpha1.ScorerMetricsSpec) (map[int]metrics.BucketCounts, error) {
+	if r.BucketScraper == nil {
+		return nil, fmt.Errorf("this controller does not read scorer metrics")
+	}
+	var svc corev1.Service
+	if err := r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: sm.Service}, &svc); err != nil {
+		return nil, fmt.Errorf("scorer service: %w", err)
+	}
+	if svc.Spec.Type == corev1.ServiceTypeExternalName {
+		return nil, fmt.Errorf("scorer service %s is an ExternalName service; only in-cluster services are read",
+			sm.Service)
+	}
+	port, path := sm.Port, sm.Path
+	if port == 0 {
+		port = 9090
+	}
+	if path == "" {
+		path = "/metrics"
+	}
+	bearer := ""
+	if sm.Auth == routingv1alpha1.ScorerAuthServiceAccountToken {
+		f := r.TokenFile
+		if f == "" {
+			f = DefaultTokenFile
+		}
+		b, err := os.ReadFile(f)
+		if err != nil {
+			return nil, fmt.Errorf("service-account token: %w", err)
+		}
+		bearer = strings.TrimSpace(string(b))
+	}
+	url := fmt.Sprintf("http://%s.%s.svc:%d%s", sm.Service, namespace, port, path)
+	sctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	return r.BucketScraper.ScrapeBuckets(sctx, url, bearer)
+}
+
+func anyOverloaded(c buckets.Config, loads []buckets.Load) bool {
+	return slices.ContainsFunc(loads, c.Overloaded)
+}
+
+// busiest returns the buckets with the most requests in the interval, busiest first.
+func busiest(perBucket map[int]metrics.BucketCounts, m *buckets.Map) []routingv1alpha1.BucketStatus {
+	if perBucket == nil {
+		return nil
+	}
+	out := make([]routingv1alpha1.BucketStatus, 0, len(perBucket))
+	for b, c := range perBucket {
+		if b >= len(m.Owners) {
+			continue
+		}
+		bs := routingv1alpha1.BucketStatus{Bucket: int32(b), Owner: m.Owners[b], Requests: int64(c.Requests)}
+		if c.PromptTokens > 0 {
+			bs.CachedPercent = int32(100*c.CachedTokens/c.PromptTokens + 0.5)
+		}
+		bs.OwnerServedPercent = int32(100*c.OwnerServed/c.Requests + 0.5)
+		out = append(out, bs)
+	}
+	slices.SortFunc(out, func(a, b routingv1alpha1.BucketStatus) int {
+		return cmp.Or(cmp.Compare(b.Requests, a.Requests), cmp.Compare(a.Bucket, b.Bucket))
+	})
+	if len(out) > busiestShown {
+		out = out[:busiestShown]
+	}
+	return out
 }
 
 // publish writes the map to the ConfigMap, owned by the policy, if it differs from what is there.
@@ -411,6 +546,9 @@ func (r *PrefixAffinityPolicyReconciler) policiesForPod(ctx context.Context, o c
 func (r *PrefixAffinityPolicyReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.Scraper == nil {
 		r.Scraper = metrics.HTTPScraper{}
+	}
+	if r.BucketScraper == nil {
+		r.BucketScraper = metrics.HTTPScraper{}
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&routingv1alpha1.PrefixAffinityPolicy{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
