@@ -130,6 +130,27 @@ columns show that relief happened, not how much a GPU would gain (that is step 5
 is in the range ReStorEdge reported (25-33%), which is a reason to measure, not a result. Results stay in
 `results/` (not committed).
 
+On the GPU (2026-11-25, run gpu-rebalance-002; `hack/gpu/run-gpu.sh`): two vLLM replicas of code-doc-assistant's
+`lightest` tier (Phi-3.5-mini, 4-bit AWQ, 5,976 tokens of KV cache each) on one 12 GB card, the same Zipf workload
+(1,500 requests at concurrency 16, 32 output tokens, ~1,800-token prompts), prefix caches emptied and the router
+restarted before every run. Three arms: R1 (stock llm-d router), R2s with index-order moves, R2s with the busiest
+bucket that fits. Two runs per arm and offset, means:
+
+| | offset | busiest replica | cached prompt tokens | p50 | requests/s | moves per run |
+|---|---|---|---|---|---|---|
+| R1 stock router | 1 / 8 | 50% / 51% | 49% / 50% | 4.0 / 3.9 s | 3.12 / 3.99 | - |
+| R2s index order | 1 / 8 | 68% / 61% | 61% / 60% | 3.6 / 3.5 s | 3.66 / 4.44 | 0-16 / 24-32 |
+| R2s busiest that fits | 1 / 8 | 52% / 53% | 63% / 62% | 3.4 / 3.5 s | 4.02 / 4.63 | 2-3 / 5-12 |
+
+The queueing trigger fired on real queues (up to 3.3x service time). Owning prefixes by bucket raised the cached
+share by 12-14 points over the stock router, which balances load but splits documents across replicas; moving the
+busiest bucket that fits then balanced load as well as the stock router (52-53% on the busiest replica) with a
+fifth to a tenth of index order's moves, and gave the most requests per second: +29% over R1 at offset 1, +16% at
+offset 8. Tail latency did not improve (p95 6.4-6.8 s against R1's 5.8-7.4 s in runs without router restarts).
+Caveats: two runs per cell; the router pod restarted during some runs (node stalls on this single-node cluster),
+failing 0-43 of 1,500 requests in 6 of 12 runs across all arms, which also inflates those runs' p95; one
+index-order run recorded no moves although its replica was overloaded (to look into).
+
 Not yet: warming a bucket's new owner before the move is published, replicating a bucket too busy for one
 owner, weighing buckets by more than their request count (cached share, trend over intervals), and the HitRate
 trigger.

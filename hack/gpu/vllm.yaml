@@ -67,7 +67,7 @@ spec:
             - --max-model-len
             - "4096"
             - --gpu-memory-utilization
-            - "0.42"
+            - "0.40"
             - --max-num-seqs
             - "4"
             - --enable-prefix-caching
@@ -77,11 +77,14 @@ spec:
             - { name: HF_HUB_OFFLINE, value: "1" }  # the checkpoint is fetched once by hf-download.yaml
             - { name: NVIDIA_VISIBLE_DEVICES, value: all }
             - { name: NVIDIA_DRIVER_CAPABILITIES, value: "compute,utility" }
+            # Enables POST /reset_prefix_cache, which run-gpu.sh uses to start each run with empty KV caches
+            # without reloading the model (a reload from disk took ~10 min with 1.75 GB of RAM free).
+            - { name: VLLM_SERVER_DEV_MODE, value: "1" }
           ports:
             - { name: http, containerPort: 8000 }
           resources:
             requests: { cpu: "1", memory: 2Gi }
-            limits: { memory: 5Gi }
+            limits: { memory: 8Gi }   # page cache counts against it: at 5Gi the checkpoint read took 5 min (0.6 GiB left for cache)
           volumeMounts:
             - { name: hf-cache, mountPath: /root/.cache/huggingface }
             - { name: dshm, mountPath: /dev/shm }
@@ -90,7 +93,7 @@ spec:
             httpGet: { path: /health, port: http }
             periodSeconds: 10
             timeoutSeconds: 5
-            failureThreshold: 90    # 15 min
+            failureThreshold: 180   # 30 min: a cold start (weights from disk, torch.compile, CUDA graphs) took ~15 min
           readinessProbe:
             httpGet: { path: /health, port: http }
             periodSeconds: 15

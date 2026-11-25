@@ -125,6 +125,21 @@ make manifests generate build test lint
    ```
    The load generator takes `MODEL` (the served name) and `MAX_TOKENS`; vLLM returns no pod header, so the split
    per replica comes from vLLM's `vllm:request_success_total` and the scorer's counters.
+   **Rebalancing on the GPU** (done 2026-11-25, gpu-rebalance-002, results in `ARCHITECTURE.md` component 1):
+   `hack/gpu/run-gpu.sh results/<dir>` runs arms R1, R2s-index and R2s-load, then
+   `python3 -I hack/gpu/analyze-gpu.py results/<dir>`. Lessons from getting it to run on this machine:
+   - a cold vLLM start reads the checkpoint at 6-8 MB/s from the minikube volume and took 15 min for the first
+     replica and over 30 min for the second (every CPU step 4-14x slower with the first one running); the startup
+     probe allows 30 min (`vllm.yaml`) and was raised to 2 h on the live StatefulSet, with `OnDelete` updates so a
+     template change does not reload the replica that is up. The overnight attempt failed 35 times in a row on this;
+   - so runs never restart the replicas: `VLLM_SERVER_DEV_MODE=1` enables `POST /reset_prefix_cache`, which empties
+     the KV caches between runs (retried: `kubectl exec` can time out after a router switch), and vLLM's counters
+     are differenced per run;
+   - GPU share 0.40 per replica (5,976 tokens of KV cache each) leaves headroom for Windows' varying share of the
+     card; memory limit 8 GiB, since page cache counts against it;
+   - the code-doc-assistant stack and the simulators were scaled to 0 for the runs (2.5 GB more page cache in the
+     9 GB node), the same for every arm, and restored afterwards;
+   - the driver stops if a replica restarts or is not ready, rather than measuring a pool that changed.
 6. **`CachePolicy`.**
 
 ## Relation to code-doc-assistant
