@@ -23,6 +23,8 @@ spec:
             - { name: CONCURRENCY, value: "${CONCURRENCY}" }
             - { name: SEED, value: "${SEED}" }
             - { name: HOT_OFFSET, value: "${HOT_OFFSET}" }
+            - { name: MODEL, value: "${MODEL}" }
+            - { name: MAX_TOKENS, value: "${MAX_TOKENS}" }
           volumeMounts:
             - { name: app, mountPath: /app }
           resources:

@@ -1,0 +1,27 @@
+# PrefixAffinityPolicy for the two vLLM replicas (hack/gpu/vllm.yaml); as the simulator sample, with the scorer's
+# counters read from the GPU router's EPP.
+apiVersion: routing.chrisys93.github.io/v1alpha1
+kind: PrefixAffinityPolicy
+metadata:
+  name: gpu-pool
+  namespace: ilo-gpu
+spec:
+  selector:
+    matchLabels:
+      app: vllm-pool
+  metricsPort: 8000
+  buckets: 64
+  prefix:
+    bytes: 2048
+  trigger:
+    type: QueueDelay
+    queueDelayPercent: 200
+    minRequests: 20
+  rebalance:
+    interval: 30s
+    maxMovesPerInterval: 4
+    cooldown: 2m
+  scorerMetrics:
+    service: router-epp
+    port: 9090
+    auth: ServiceAccountToken

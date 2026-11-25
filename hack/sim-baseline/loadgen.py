@@ -28,7 +28,8 @@ DOCS = int(os.environ.get("DOCS", "32"))
 DOC_WORDS = int(os.environ.get("DOC_WORDS", "300"))
 HOT_OFFSET = int(os.environ.get("HOT_OFFSET") or "0")  # zipf: document (rank + HOT_OFFSET) % DOCS is the rank-th most popular
 ZIPF_S = float(os.environ.get("ZIPF_S", "1.2"))
-MAX_TOKENS = int(os.environ.get("MAX_TOKENS", "16"))
+MAX_TOKENS = int(os.environ.get("MAX_TOKENS") or "16")  # unset or empty: 16
+MODEL = os.environ.get("MODEL") or "sim-model"  # served model name (vLLM: the tier's name)
 SEED = int(os.environ.get("SEED", "1"))
 METRICS_HOST = os.environ.get("METRICS_HOST", "sim-direct")
 METRICS_PORT = int(os.environ.get("METRICS_PORT", "8000"))
@@ -117,7 +118,7 @@ def worker(wid):
         doc = pick_doc(rng, i)
         prompt = f"{PREAMBLE}\n\nContext:\n{DOC_TEXT[doc]}\n\nQuestion {i}: " + words(rng, 15)
         body = json.dumps({
-            "model": "sim-model",
+            "model": MODEL,
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": MAX_TOKENS,
         }).encode()

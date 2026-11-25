@@ -106,6 +106,25 @@ make manifests generate build test lint
    single-node API server stalls for seconds at times and the 15 s default restarted the controller twice.
 5. **Measurement on GPU:** two vLLM replicas sharing the GPU; arms R0-R3 of `ARCHITECTURE.md` with the
    code-doc-assistant evaluation set and synthetic skewed workloads.
+   **Pipeline check** (done 2026-11-24, `hack/gpu/`): two replicas of code-doc-assistant's `lightest` tier
+   (Phi-3.5-mini 4-bit AWQ, GPU share 0.42 each: 2.44 GiB KV cache, 6,630 tokens) as a StatefulSet, the router in
+   arm R2s, policy `gpu-pool`. Smoke test (gpu-smoke-001: Zipf, offset 1, 400 requests, concurrency 6, 32 output
+   tokens): no errors, 82% of requests on `vllm-0` as the map predicts, every request on its bucket's owner, 60% of
+   prompt tokens cached, p50 1.18 s, p95 2.57 s, 4.5 requests/s; queueing stayed at about 30% of service time, so
+   nothing moved. Then the whole code-doc-assistant pipeline (its app as an OpenAI-compatible client of the router,
+   `lightest-ilo-001`): Q1, Q2, Q6, Q10 answered, wall p50 26 s. Host memory is the limit: the two vLLM processes
+   hold 2.8 and 3.6 GB, leaving 2.8 GB of the 11 GB VM with the app stack running.
+
+   ```sh
+   kubectl apply -f hack/gpu/vllm.yaml          # namespace, cache PVC, Service; StatefulSet last (see the file)
+   kubectl apply -f hack/gpu/hf-download.yaml   # checkpoint once, before the StatefulSet (replicas run offline)
+   kubectl apply -f hack/gpu/epp-bucket-map-rbac.yaml
+   helm install router oci://ghcr.io/llm-d/charts/llm-d-router-standalone --version v1.0.0 -n ilo-gpu \
+     -f hack/gpu/router-values.yaml -f hack/gpu/router-values-r2-strict.yaml
+   kubectl apply -f hack/gpu/policy.yaml
+   ```
+   The load generator takes `MODEL` (the served name) and `MAX_TOKENS`; vLLM returns no pod header, so the split
+   per replica comes from vLLM's `vllm:request_success_total` and the scorer's counters.
 6. **`CachePolicy`.**
 
 ## Relation to code-doc-assistant

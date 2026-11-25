@@ -1,0 +1,110 @@
+# Two vLLM replicas of code-doc-assistant's `lightest` tier (Phi-3.5-mini-instruct, 4-bit AWQ, 2.28 GB) sharing the
+# one 12 GB GPU of the WSL2 minikube node. GPU access as code-doc-assistant's chart does it on WSL2: runtime injection
+# (NVIDIA_VISIBLE_DEVICES) plus the libdxcore.so mount, no device-plugin resource, so both pods see the card.
+#
+# Memory per replica: --gpu-memory-utilization 0.42 of 11.94 GiB = 5.0 GiB: weights 2.1 GiB, KV cache ~2 GiB, the rest
+# activations and CUDA graphs. Phi-3.5-mini has no grouped-query attention (32 layers x 32 KV heads x 96), so a token
+# costs ~0.375 MiB of KV cache at fp16: 0.38 would leave less than one 4,096-token context, which vLLM refuses. Two
+# replicas take 10.0 GiB; Windows keeps 0.9-1.7 GB.
+#
+# OrderedReady: vllm-1 starts only once vllm-0 serves, so the two loads never overlap (host RAM, and the second
+# replica's free-memory check must see the first one's share already taken).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ilo-gpu
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: hf-cache            # one checkpoint download, read by both replicas (single node: ReadWriteOnce is enough)
+  namespace: ilo-gpu
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests: { storage: 10Gi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-direct
+  namespace: ilo-gpu
+spec:
+  clusterIP: None
+  selector: { app: vllm-pool }
+  ports:
+    - { name: http, port: 8000, targetPort: 8000 }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: vllm
+  namespace: ilo-gpu
+spec:
+  replicas: 2
+  serviceName: vllm-direct
+  podManagementPolicy: OrderedReady
+  selector:
+    matchLabels: { app: vllm-pool }
+  template:
+    metadata:
+      labels: { app: vllm-pool }
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:v0.32.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - --model
+            - thesven/Phi-3.5-mini-instruct-awq
+            - --served-model-name
+            - phi3.5:3.8b-mini-instruct-q4_K_M      # the tier's name, as code-doc-assistant serves it
+            - --host
+            - 0.0.0.0
+            - --port
+            - "8000"
+            - --max-model-len
+            - "4096"
+            - --gpu-memory-utilization
+            - "0.42"
+            - --max-num-seqs
+            - "4"
+            - --enable-prefix-caching
+            - --enable-prompt-tokens-details
+          env:
+            - { name: HF_HOME, value: /root/.cache/huggingface }
+            - { name: HF_HUB_OFFLINE, value: "1" }  # the checkpoint is fetched once by hf-download.yaml
+            - { name: NVIDIA_VISIBLE_DEVICES, value: all }
+            - { name: NVIDIA_DRIVER_CAPABILITIES, value: "compute,utility" }
+          ports:
+            - { name: http, containerPort: 8000 }
+          resources:
+            requests: { cpu: "1", memory: 2Gi }
+            limits: { memory: 5Gi }
+          volumeMounts:
+            - { name: hf-cache, mountPath: /root/.cache/huggingface }
+            - { name: dshm, mountPath: /dev/shm }
+            - { name: wsl-libdxcore, mountPath: /usr/lib/x86_64-linux-gnu/libdxcore.so, readOnly: true }
+          startupProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 90    # 15 min
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 12
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 10
+      volumes:
+        - name: hf-cache
+          persistentVolumeClaim: { claimName: hf-cache }
+        - name: dshm
+          emptyDir: { medium: Memory, sizeLimit: 1Gi }
+        - name: wsl-libdxcore
+          hostPath: { path: /usr/lib/x86_64-linux-gnu/libdxcore.so, type: File }

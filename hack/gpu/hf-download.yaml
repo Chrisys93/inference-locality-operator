@@ -1,0 +1,27 @@
+# Fetches the lightest tier's checkpoint into the hf-cache PVC once, before the replicas start (they run with
+# HF_HUB_OFFLINE=1). Uses the vLLM image, which already carries the Hugging Face client.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: hf-download
+  namespace: ilo-gpu
+spec:
+  backoffLimit: 1
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: download
+          image: vllm/vllm-openai:v0.32.0
+          imagePullPolicy: IfNotPresent
+          command: ["hf", "download", "thesven/Phi-3.5-mini-instruct-awq"]
+          env:
+            - { name: HF_HOME, value: /root/.cache/huggingface }
+          resources:
+            requests: { cpu: 500m, memory: 512Mi }
+            limits: { memory: 1Gi }
+          volumeMounts:
+            - { name: hf-cache, mountPath: /root/.cache/huggingface }
+      volumes:
+        - name: hf-cache
+          persistentVolumeClaim: { claimName: hf-cache }

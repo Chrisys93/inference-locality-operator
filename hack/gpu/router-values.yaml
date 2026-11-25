@@ -1,0 +1,19 @@
+# llm-d router v1.0.0 over the two vLLM replicas (hack/gpu/vllm.yaml): arm R1, the stock plugin set, sized as for the
+# simulators (hack/sim-baseline/router-values.yaml).
+#   helm install router oci://ghcr.io/llm-d/charts/llm-d-router-standalone --version v1.0.0 -n ilo-gpu \
+#     -f hack/gpu/router-values.yaml [-f hack/gpu/router-values-r2-strict.yaml]
+router:
+  modelServers:
+    matchLabels:
+      app: vllm-pool
+  epp:
+    image:
+      tag: v1.0.0
+      pullPolicy: IfNotPresent
+    resources:
+      requests: { cpu: 500m, memory: 512Mi }
+      limits: { memory: 1Gi }
+  proxy:
+    resources:
+      requests: { cpu: 250m, memory: 128Mi }
+      limits: { memory: 512Mi }
