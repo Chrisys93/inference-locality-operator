@@ -74,6 +74,24 @@ overload. The thesis splits such a bucket; here, the bucket gets a second owner 
 over both (warmed as in E2). Arms: R2s-load with and without replication; workload zipf with a dominant document.
 Later, after E1 and E2.
 
+## E4 Similar wording, different context
+
+Prompts that share wording but not context are where reuse can go wrong. For exact prefix reuse the risk is to
+routing, not to answers: KV is reused only for an identical leading run of tokens, so answers stay correct, but the
+bucket key (the first `prefixBytes` of the prompt) groups prompts by whatever leads. With a shared template first,
+prompts about different contexts share a bucket and a replica (load concentrates with little reuse: false locality);
+with the context first, one context reached through different wording splits across buckets. For approximate reuse
+(semantic caches, KV blending, ReStorEdge's reuse of computations on similar inputs) the risk is to the answer itself:
+the state or answer of the wrong context, plausible but wrong.
+
+Workload with checkable answers: synthetic factual documents, each stating its own facts ("in document k the
+service's port is p_k ..."), and the same questions asked of every document; an answer is correct only if it matches
+its own document's fact (exact match, no judge). Varied: layout (question first or context first, template length),
+wording (identical, paraphrased, unrelated), and later the reuse mechanism (exact now; approximate if added).
+Measured: whether buckets follow context or wording, the cache hits that happened, load concentration, and **the share
+of answers correct for their own context**: 100% expected in every arm with exact reuse; with approximate reuse, the
+trade-off curve against the reuse gained.
+
 ## Common method
 
 Two vLLM replicas of code-doc-assistant's `lightest` tier on one 12 GB GPU (`hack/gpu/`); prefix caches emptied and
