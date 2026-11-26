@@ -27,6 +27,13 @@ import (
 // Type is the plugin type named in the EndpointPickerConfig.
 const Type = "bucket-affinity-scorer"
 
+// Metric names: ilo_bucket_<name>{bucket="<n>"}.
+const (
+	metricNamespace = "ilo"
+	metricSubsystem = "bucket"
+	bucketLabel     = "bucket"
+)
+
 // MapKey is the ConfigMap key holding the map; the controller writes the same key.
 const MapKey = "map.json"
 
@@ -41,6 +48,11 @@ type Parameters struct {
 	ConfigMap string `json:"configMap"`
 	// Namespace of the ConfigMap; defaults to the EPP's own namespace.
 	Namespace string `json:"namespace,omitempty"`
+	// Warm keeps each bucket's last prompts and, when a bucket moves, replays them to its new owner before routing
+	// the bucket there (warm.go).
+	Warm bool `json:"warm,omitempty"`
+	// WarmPrompts is how many prompts are kept per bucket (default 4).
+	WarmPrompts int `json:"warmPrompts,omitempty"`
 }
 
 // Scorer scores the owner of the request's bucket 1 and every other replica 0.
@@ -48,6 +60,7 @@ type Scorer struct {
 	typedName fwkplugin.TypedName
 	current   atomic.Pointer[buckets.Map]
 	stats     *stats
+	warm      *warmer // nil: moves take effect at once
 }
 
 // Factory builds the plugin from its parameters and starts watching the map ConfigMap.
@@ -65,6 +78,9 @@ func Factory(name string, raw *json.Decoder, handle fwkplugin.Handle) (fwkplugin
 		p.Namespace = ownNamespace()
 	}
 	s := New(name, handle.Metrics())
+	if p.Warm {
+		s.EnableWarming(p.WarmPrompts, handle.Metrics())
+	}
 	if err := watchMap(handle.Context(), p.Namespace, p.ConfigMap, s.SetMap); err != nil {
 		return nil, fmt.Errorf("%s: %w", Type, err)
 	}
@@ -85,8 +101,17 @@ func (s *Scorer) TypedName() fwkplugin.TypedName { return s.typedName }
 // Category: the scorer prefers the replica holding the bucket's state.
 func (s *Scorer) Category() fwksched.ScorerCategory { return fwksched.Affinity }
 
-// SetMap replaces the map in use; nil clears it (every replica then scores 0).
-func (s *Scorer) SetMap(m *buckets.Map) { s.current.Store(m) }
+// EnableWarming turns on warming of a moved bucket's new owner, keeping keep prompts per bucket.
+func (s *Scorer) EnableWarming(keep int, reg prometheus.Registerer) { s.warm = newWarmer(keep, reg) }
+
+// SetMap replaces the map in use; nil clears it (every replica then scores 0). With warming, every bucket the new map
+// moves stays on its previous owner until the new owner is warmed.
+func (s *Scorer) SetMap(m *buckets.Map) {
+	prev := s.current.Swap(m)
+	if s.warm != nil {
+		s.warm.moved(context.Background(), prev, m)
+	}
+}
 
 // Map returns the map in use, nil when none has been read.
 func (s *Scorer) Map() *buckets.Map { return s.current.Load() }
@@ -110,7 +135,11 @@ func (s *Scorer) Score(
 	_ context.Context, req *fwksched.InferenceRequest, endpoints []fwksched.Endpoint,
 ) map[fwksched.Endpoint]float64 {
 	scores := make(map[fwksched.Endpoint]float64, len(endpoints))
-	_, owner, ok := bucketOf(s.current.Load(), req)
+	b, owner, ok := bucketOf(s.current.Load(), req)
+	if ok && s.warm != nil {
+		s.warm.noteEndpoints(endpoints)
+		owner = s.warm.route(b, owner, endpoints)
+	}
 	for _, e := range endpoints {
 		scores[e] = 0
 		if ok && e.GetMetadata() != nil && e.GetMetadata().Name == owner {
@@ -140,6 +169,9 @@ func (s *Scorer) ResponseBody(
 		cached = resp.Usage.PromptTokenDetails.CachedTokens
 	}
 	s.stats.add(b, served == owner, resp.Usage.PromptTokens, cached)
+	if s.warm != nil {
+		s.warm.remember(b, req)
+	}
 	log.FromContext(ctx).V(5).Info("bucket", "bucket", b, "owner", owner, "served", served,
 		"promptTokens", resp.Usage.PromptTokens, "cachedTokens", cached)
 }
@@ -172,8 +204,9 @@ type stats struct {
 
 func newStats(reg prometheus.Registerer) *stats {
 	vec := func(name, help string) *prometheus.CounterVec {
-		return prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: "ilo", Subsystem: "bucket", Name: name, Help: help},
-			[]string{"bucket"})
+		return prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: name, Help: help,
+		}, []string{bucketLabel})
 	}
 	st := &stats{
 		requests:     vec("requests_total", "Completed requests per prefix bucket."),

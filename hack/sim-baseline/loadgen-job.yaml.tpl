@@ -25,6 +25,7 @@ spec:
             - { name: HOT_OFFSET, value: "${HOT_OFFSET}" }
             - { name: MODEL, value: "${MODEL}" }
             - { name: MAX_TOKENS, value: "${MAX_TOKENS}" }
+            - { name: RATE, value: "${RATE}" }
           volumeMounts:
             - { name: app, mountPath: /app }
           resources:

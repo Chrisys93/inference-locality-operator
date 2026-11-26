@@ -3,7 +3,7 @@
 #   R1         stock llm-d router (queue, KV-cache and prefix-cache scorers); the operator does not move buckets
 #   R2s-index  bucket-affinity-scorer, strict; buckets move in index order (policy without scorerMetrics)
 #   R2s-load   bucket-affinity-scorer, strict; the busiest bucket that fits moves first (scorerMetrics set)
-# Zipf workload; HOT_OFFSET picks which documents are popular and so how skewed the map's start is (offset 1: ~82%
+# WORKLOAD (zipf, shift; EXPERIMENTS.md), closed loop or open loop at RATE. Zipf: HOT_OFFSET picks which documents are popular and so how skewed the map's start is (offset 1: ~82%
 # of requests on vllm-0). Before each run: both replicas' prefix caches emptied (POST /reset_prefix_cache, vLLM dev
 # mode; the replicas stay loaded, since a reload from disk took ~10 min on this machine), the router restarted (empty
 # prefix index), and a fresh map. During each run the policy status is recorded every 10 s; before and after it, each
@@ -21,6 +21,8 @@ REPEATS=${REPEATS:-2}
 REQUESTS=${REQUESTS:-1500}
 CONCURRENCY=${CONCURRENCY:-16}
 MAX_TOKENS=${MAX_TOKENS:-32}
+WORKLOAD=${WORKLOAD:-zipf}
+RATE=${RATE:-}           # requests/s, open loop (Poisson); empty = closed loop at CONCURRENCY
 OFFSETS=${OFFSETS:-"1 8"}
 ARMS=${ARMS:-"R1 R2s-index R2s-load"}
 JOB_TIMEOUT=${JOB_TIMEOUT:-900s}
@@ -132,7 +134,7 @@ replicas_unchanged() {  # stop the whole comparison when a replica restarted or 
 read -r ready0 RESTARTS0 <<<"$(replica_state)"
 [ "$ready0" = 2 ] || { log "STOP: $ready0 of 2 replicas ready at start"; exit 1; }
 kubectl -n $NS create configmap loadgen --from-file="$SIM/loadgen.py" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
-log "start:arms=[$ARMS] repeats=$REPEATS offsets=[$OFFSETS] requests=$REQUESTS concurrency=$CONCURRENCY max_tokens=$MAX_TOKENS"
+log "start: arms=[$ARMS] repeats=$REPEATS offsets=[$OFFSETS] workload=$WORKLOAD rate=${RATE:-closed} requests=$REQUESTS concurrency=$CONCURRENCY max_tokens=$MAX_TOKENS"
 for off in $OFFSETS; do
 for rep in $(seq 1 "$REPEATS"); do
   arms=$ARMS
@@ -148,8 +150,8 @@ for rep in $(seq 1 "$REPEATS"); do
     watch_status > "$OUT/$job.status.jsonl" &
     watcher=$!
     kubectl -n $NS delete job "$job" --ignore-not-found >/dev/null
-    JOB=$job ARM=$arm TARGET=http://router-epp:8081 WORKLOAD=zipf REQUESTS=$REQUESTS CONCURRENCY=$CONCURRENCY \
-      SEED=$rep HOT_OFFSET=$off MODEL=$MODEL MAX_TOKENS=$MAX_TOKENS envsubst < "$SIM/loadgen-job.yaml.tpl" |
+    JOB=$job ARM=$arm TARGET=http://router-epp:8081 WORKLOAD=$WORKLOAD REQUESTS=$REQUESTS CONCURRENCY=$CONCURRENCY \
+      SEED=$rep HOT_OFFSET=$off MODEL=$MODEL MAX_TOKENS=$MAX_TOKENS RATE=$RATE envsubst < "$SIM/loadgen-job.yaml.tpl" |
       sed "s/namespace: ilo-sim/namespace: $NS/" | kubectl apply -f - >/dev/null
     if kubectl -n $NS wait --for=condition=complete job/"$job" --timeout=$JOB_TIMEOUT >/dev/null; then
       kubectl -n $NS logs job/"$job" > "$OUT/$job.jsonl"
