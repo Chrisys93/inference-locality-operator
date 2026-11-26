@@ -23,6 +23,9 @@ CONCURRENCY=${CONCURRENCY:-16}
 MAX_TOKENS=${MAX_TOKENS:-32}
 WORKLOAD=${WORKLOAD:-zipf}
 RATE=${RATE:-}           # requests/s, open loop (Poisson); empty = closed loop at CONCURRENCY
+PROMPTS=${PROMPTS:-rag}  # rag | facts (EXPERIMENTS.md E4: checkable answers)
+LAYOUT=${LAYOUT:-context_first}
+WORDING=${WORDING:-identical}
 OFFSETS=${OFFSETS:-"1 8"}
 ARMS=${ARMS:-"R1 R2s-index R2s-load"}
 JOB_TIMEOUT=${JOB_TIMEOUT:-900s}
@@ -134,7 +137,7 @@ replicas_unchanged() {  # stop the whole comparison when a replica restarted or 
 read -r ready0 RESTARTS0 <<<"$(replica_state)"
 [ "$ready0" = 2 ] || { log "STOP: $ready0 of 2 replicas ready at start"; exit 1; }
 kubectl -n $NS create configmap loadgen --from-file="$SIM/loadgen.py" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
-log "start: arms=[$ARMS] repeats=$REPEATS offsets=[$OFFSETS] workload=$WORKLOAD rate=${RATE:-closed} requests=$REQUESTS concurrency=$CONCURRENCY max_tokens=$MAX_TOKENS"
+log "start: arms=[$ARMS] repeats=$REPEATS offsets=[$OFFSETS] workload=$WORKLOAD rate=${RATE:-closed} prompts=$PROMPTS layout=$LAYOUT wording=$WORDING requests=$REQUESTS concurrency=$CONCURRENCY max_tokens=$MAX_TOKENS"
 for off in $OFFSETS; do
 for rep in $(seq 1 "$REPEATS"); do
   arms=$ARMS
@@ -151,7 +154,8 @@ for rep in $(seq 1 "$REPEATS"); do
     watcher=$!
     kubectl -n $NS delete job "$job" --ignore-not-found >/dev/null
     JOB=$job ARM=$arm TARGET=http://router-epp:8081 WORKLOAD=$WORKLOAD REQUESTS=$REQUESTS CONCURRENCY=$CONCURRENCY \
-      SEED=$rep HOT_OFFSET=$off MODEL=$MODEL MAX_TOKENS=$MAX_TOKENS RATE=$RATE envsubst < "$SIM/loadgen-job.yaml.tpl" |
+      SEED=$rep HOT_OFFSET=$off MODEL=$MODEL MAX_TOKENS=$MAX_TOKENS RATE=$RATE \
+      PROMPTS=$PROMPTS LAYOUT=$LAYOUT WORDING=$WORDING envsubst < "$SIM/loadgen-job.yaml.tpl" |
       sed "s/namespace: ilo-sim/namespace: $NS/" | kubectl apply -f - >/dev/null
     if kubectl -n $NS wait --for=condition=complete job/"$job" --timeout=$JOB_TIMEOUT >/dev/null; then
       kubectl -n $NS logs job/"$job" > "$OUT/$job.jsonl"

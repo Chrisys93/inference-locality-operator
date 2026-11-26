@@ -7,6 +7,12 @@ shape of a RAG prompt. Which document is chosen depends on the workload:
   zipf       Zipf popularity (exponent ZIPF_S) over a fixed ranking
   shift      Zipf, but the ranking rotates every quarter of the run (popular set moves)
 
+Prompts (PROMPTS): "rag" (default): preamble, a document of random words, a unique question. "facts" (EXPERIMENTS.md E4):
+each document states its own facts (port, owner, region, codename) among filler words, the same questions are asked of
+every document, and each answer is checked against its own document's fact (record fields "expected", "correct").
+LAYOUT puts the context first (default) or the question first; WORDING asks the questions in one fixed wording
+("identical", default), in one of several paraphrases ("paraphrase"), or mixes in unrelated questions ("mixed").
+
 Arrivals: closed loop by default (CONCURRENCY workers, each sending its next request when the last one returns); with
 RATE > 0, open loop: requests are sent at Poisson arrival times of RATE per second, whatever the service's speed (up to
 MAX_INFLIGHT outstanding), as independent users arrive.
@@ -40,6 +46,9 @@ METRICS_PORT = int(os.environ.get("METRICS_PORT", "8000"))
 TIMEOUT = float(os.environ.get("TIMEOUT", "120"))
 RATE = float(os.environ.get("RATE") or "0")  # requests per second, open loop; 0 = closed loop
 MAX_INFLIGHT = int(os.environ.get("MAX_INFLIGHT") or "64")
+PROMPTS = os.environ.get("PROMPTS") or "rag"           # rag | facts
+LAYOUT = os.environ.get("LAYOUT") or "context_first"   # facts: context_first | question_first
+WORDING = os.environ.get("WORDING") or "identical"     # facts: identical | paraphrase | mixed
 
 METRIC_NAMES = (
     "vllm:prefix_cache_hits_total",
@@ -62,11 +71,68 @@ def words(rng, n):
     return " ".join(rng.choice(vocab) for _ in range(n))
 
 
+# facts: attribute -> (how a document states it, the questions asking for it: first = the fixed wording)
+FACTS = {
+    "port": ("The service listens on port {v}.",
+             ["What port does the service listen on?", "Which port is the service reachable on?",
+              "On which TCP port should clients connect to the service?"]),
+    "owner": ("The service is owned by the {v} team.",
+              ["Which team owns the service?", "Who is responsible for the service?",
+               "What is the name of the team that maintains the service?"]),
+    "region": ("The service is deployed in the {v} region.",
+               ["In which region is the service deployed?", "Where does the service run?",
+                "Which deployment region hosts the service?"]),
+    "codename": ("The service's release codename is {v}.",
+                 ["What is the service's release codename?", "Which codename does the current release have?",
+                  "What is the codename of the service's release?"]),
+}
+UNRELATED = ["Summarise the context in one sentence.", "Is the context about a database? Answer yes or no.",
+             "How many sentences does the context have, roughly?"]
+TEAMS = ["amber", "basalt", "cobalt", "delta", "ember", "fjord", "garnet", "harbor", "indigo", "juniper", "kestrel",
+         "lumen", "meadow", "nimbus", "onyx", "prism"]
+REGIONS = ["north", "south", "east", "west", "central", "coastal", "alpine", "lowland"]
+CODENAMES = ["Acorn", "Beacon", "Comet", "Drift", "Echo", "Falcon", "Glacier", "Harvest", "Iris", "Jetty", "Kite",
+             "Lantern", "Mosaic", "Nebula", "Orchid", "Pebble", "Quartz", "Ripple", "Sable", "Tundra", "Umbra",
+             "Vortex", "Willow", "Xenon", "Yarrow", "Zephyr", "Aster", "Bramble", "Cinder", "Dune", "Fable", "Grove"]
+
+
+def fact_values(d):
+    """Document d's facts: every value is distinct between documents where the value set allows it."""
+    return {"port": str(20000 + 37 * d), "owner": f"{TEAMS[d % len(TEAMS)]}-{d}",
+            "region": f"{REGIONS[d % len(REGIONS)]}-{d}", "codename": f"{CODENAMES[d % len(CODENAMES)]}{d}"}
+
+
 def build_docs():
     rng = random.Random(1000)  # same documents in every run
     preamble = "You are a code documentation assistant. Answer from the context only. " + words(rng, 60)
+    if PROMPTS == "facts":
+        preamble = ("You answer questions about a service from its documentation only. Reply with the value asked "
+                    "for and nothing else. ") + words(rng, 40)
+        docs = []
+        for d in range(DOCS):
+            facts = [stmt.format(v=fact_values(d)[a]) for a, (stmt, _) in FACTS.items()]
+            filler = words(rng, DOC_WORDS).split(" ")
+            step = max(1, len(filler) // (len(facts) + 1))
+            for k, f in enumerate(facts):  # facts spread through the filler
+                filler.insert((k + 1) * step + k, f)
+            docs.append(f"[service {d}] " + " ".join(filler))
+        return preamble, docs
     docs = [f"[doc {d}] " + words(rng, DOC_WORDS) for d in range(DOCS)]
     return preamble, docs
+
+
+def facts_prompt(rng, doc, i):
+    """The prompt, and the expected answer (None for an unrelated question)."""
+    if WORDING == "mixed" and rng.random() < 0.25:
+        question, expected = rng.choice(UNRELATED), None
+    else:
+        attr = rng.choice(list(FACTS))
+        wordings = FACTS[attr][1]
+        question = wordings[0] if WORDING == "identical" else rng.choice(wordings)
+        expected = fact_values(doc)[attr]
+    context = f"Context:\n{DOC_TEXT[doc]}"
+    body = f"{context}\n\nQuestion: {question}" if LAYOUT == "context_first" else f"Question: {question}\n\n{context}"
+    return f"{PREAMBLE}\n\n{body}\n\n(request {i})", expected
 
 
 def zipf_weights(n, s):
@@ -152,16 +218,21 @@ def open_loop():
 def send(rng, i, sched=None):
     """One request: pick a document, send the prompt, emit its record."""
     doc = pick_doc(rng, i)
-    prompt = f"{PREAMBLE}\n\nContext:\n{DOC_TEXT[doc]}\n\nQuestion {i}: " + words(rng, 15)
-    body = json.dumps({
-        "model": MODEL,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": MAX_TOKENS,
-    }).encode()
+    expected = None
+    if PROMPTS == "facts":
+        prompt, expected = facts_prompt(rng, doc, i)
+    else:
+        prompt = f"{PREAMBLE}\n\nContext:\n{DOC_TEXT[doc]}\n\nQuestion {i}: " + words(rng, 15)
+    req_body = {"model": MODEL, "messages": [{"role": "user", "content": prompt}], "max_tokens": MAX_TOKENS}
+    if PROMPTS == "facts":
+        req_body["temperature"] = 0  # answers are compared, so decoding is greedy
+    body = json.dumps(req_body).encode()
     req = urllib.request.Request(f"{TARGET}/v1/chat/completions", data=body,
                                  headers={"Content-Type": "application/json"})
     t0 = time.time()
     rec = {"type": "req", "i": i, "doc": doc, "t0": t0}
+    if PROMPTS == "facts":
+        rec["expected"] = expected
     if sched is not None:
         rec["late"] = round(t0 - sched, 3)  # open loop: how far behind its arrival time it was sent
     try:
@@ -172,6 +243,11 @@ def send(rng, i, sched=None):
             usage = data.get("usage") or {}
             rec["prompt_tokens"] = usage.get("prompt_tokens")
             rec["cached_tokens"] = (usage.get("prompt_tokens_details") or {}).get("cached_tokens")
+            if PROMPTS == "facts":
+                answer = ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+                rec["answer"] = answer[:200]
+                if expected is not None:
+                    rec["correct"] = expected.lower() in answer.lower()
     except urllib.error.HTTPError as e:
         rec["status"] = e.code
         rec["error"] = e.read()[:200].decode(errors="replace")
@@ -185,6 +261,7 @@ def send(rng, i, sched=None):
 def main():
     emit({"type": "start", "arm": ARM, "workload": WORKLOAD, "hot_offset": HOT_OFFSET, "requests": REQUESTS,
           "concurrency": CONCURRENCY, "rate": RATE,
+          "prompts": PROMPTS, "layout": LAYOUT, "wording": WORDING,
           "docs": DOCS, "doc_words": DOC_WORDS, "zipf_s": ZIPF_S, "seed": SEED, "target": TARGET, "t": time.time()})
     scrape()
     if RATE > 0:

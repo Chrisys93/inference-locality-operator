@@ -26,6 +26,9 @@ spec:
             - { name: MODEL, value: "${MODEL}" }
             - { name: MAX_TOKENS, value: "${MAX_TOKENS}" }
             - { name: RATE, value: "${RATE}" }
+            - { name: PROMPTS, value: "${PROMPTS}" }
+            - { name: LAYOUT, value: "${LAYOUT}" }
+            - { name: WORDING, value: "${WORDING}" }
           volumeMounts:
             - { name: app, mountPath: /app }
           resources:
