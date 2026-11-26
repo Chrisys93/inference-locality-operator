@@ -92,6 +92,29 @@ Measured: whether buckets follow context or wording, the cache hits that happene
 of answers correct for their own context**: 100% expected in every arm with exact reuse; with approximate reuse, the
 trade-off curve against the reuse gained.
 
+**Keying, as the hypothesis to test.** Two levels, each doing one job:
+
+- **model fingerprint, for correctness**: KV state is valid only for the model that produced it (weights, tokenizer,
+  quantization, precision), so it is partitioned by model; this is where exactness comes from;
+- **context identity, for locality**: requests about the same context are placed on the same owner, which is what
+  produces exact prefix hits. Best taken from identity when the application knows it (the retrieved document or chunk
+  IDs of a RAG request), otherwise from an embedding of the *context part* of the prompt (an embedding of the whole
+  prompt is dominated by shared wording, the same failure as the byte-prefix key). Similarity is used only where reuse
+  is deliberately approximate, where its threshold traces the correctness curve. The embedding's cost per request is
+  measured with it.
+
+Arms for E4: byte-prefix key (now), context-ID key, context-embedding key; layouts and wordings as above.
+
+## E5 Heterogeneity: hardware, precision, models
+
+Exact reuse assumes the same model on the same numerics. Across GPU types, kernels or precisions the same model gives
+slightly different KV (numerically approximate reuse); across fine-tunes of one base model, closer but not equal state;
+across different models, none without a learned mapping (as projectors map vision embeddings into a language model's
+input space, but for attention state, and lossy by construction). Each step makes every placement decision carry a
+quality cost as well as a time cost. Measured as E4's correctness share and output divergence, against the reuse each
+step allows. Needs hardware beyond this machine for the hardware axis; precision (fp16 against fp8 KV) and fine-tuned
+variants are possible here.
+
 ## Common method
 
 Two vLLM replicas of code-doc-assistant's `lightest` tier on one 12 GB GPU (`hack/gpu/`); prefix caches emptied and
