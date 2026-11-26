@@ -25,6 +25,22 @@ document popularity, as in the papers:
   answers. Closed-loop concurrency (gpu-rebalance-002) hides overload: a slow replica simply receives fewer requests.
   The rate is set below the pool's capacity but above what one replica can take for the popular set.
 
+## Answer quality, for every experiment
+
+Locality is only worth having at the same answer quality, so every result reports quality next to throughput and
+latency. Exact prefix reuse should not change an answer (the same tokens give the same KV), but cached and uncached
+prefills take different kernels and batch shapes, so greedy decoding can occasionally diverge; and a policy can change
+answers indirectly, through failed requests, timeouts or re-plans under load in an adaptive pipeline. Approximate
+reuse (blending, semantic caches, lower-precision KV, KV transfer) would make quality the main trade-off. Measured as:
+
+- **E0, invariance**: a fixed prompt set at temperature 0, prefix cache on and off, and through each arm: the share of
+  identical outputs, and where they differ, the first differing token and the length of the divergence;
+- **end-to-end quality** on the real task: the code-doc-assistant evaluation set (`eval/run_eval.py`) through each
+  arm, two to three runs each: automatic checks, retrieval metrics and the LLM judge;
+- **failed and degraded answers**: errors, timeouts and re-plans count against the arm that caused them.
+
+The synthetic workload (random-word documents, 32 output tokens) measures load and locality only, not quality.
+
 ## E1 Convergence after a popularity shift (no new mechanism)
 
 Arms R1, R2s-index, R2s-load (as in gpu-rebalance-002); workload shift, open loop. Per 30-s interval and per phase:
