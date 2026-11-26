@@ -219,6 +219,27 @@ func TestRebalanceByLoadMovesTheBusiestThatFits(t *testing.T) {
 	}
 }
 
+func TestRebalanceByLoadAndReuseMovesTheLeastReusedFirst(t *testing.T) {
+	m, _ := Assign(nil, []string{"a", "b"}, 32, 2048)
+	as, bs := owned(m, "a"), owned(m, "b")
+	// on a: a hot context (90% of its prompt tokens from cache), a bucket of requests that share only a template
+	// (false locality, 10%) and the busiest bucket (95%); room for one move
+	load := map[int]float64{as[0]: 20, as[1]: 20, as[2]: 30, bs[0]: 10}
+	c := qcfg
+	c.MaxMoves = 1
+
+	if moves := Rebalance(m, hotA, c, time.Unix(0, 0), load); len(moves) != 1 || moves[0].Bucket != as[2] {
+		t.Fatalf("by load: %+v, want the busiest %d", moves, as[2])
+	}
+
+	m, _ = Assign(nil, []string{"a", "b"}, 32, 2048) // Rebalance applied the move above: start again
+	c.Reuse = map[int]float64{as[0]: 0.9, as[1]: 0.1, as[2]: 0.95, bs[0]: 0.5}
+	// load x (1 - reuse): as[0] 2, as[1] 18, as[2] 1.5: the false-locality bucket goes first
+	if moves := Rebalance(m, hotA, c, time.Unix(0, 0), load); len(moves) != 1 || moves[0].Bucket != as[1] {
+		t.Fatalf("by load and reuse: %+v, want the least reused %d", moves, as[1])
+	}
+}
+
 func TestRebalanceByLoadLeavesADominantBucket(t *testing.T) {
 	m, _ := Assign(nil, []string{"a", "b"}, 16, 2048)
 	as := owned(m, "a")

@@ -37,6 +37,10 @@ type Config struct {
 	Cooldown            time.Duration
 	// MinBuckets is the fewest buckets rebalancing leaves on a replica (at least 1).
 	MinBuckets int
+	// Reuse is each bucket's share of prompt tokens served from cache (0-1) over the interval. With it, moves by
+	// load try buckets in order of load x (1 - reuse): the most relief for the least warm cache discarded. Nil: by
+	// load alone.
+	Reuse map[int]float64
 }
 
 // Move is one bucket changing owner.
@@ -168,6 +172,14 @@ func (c Config) movesInTurn(m *Map, hot, cool []Load, counts map[string]int, now
 	return moves
 }
 
+// priority is a bucket's rank for moving: its load, discounted by its reuse when Reuse is set.
+func (c Config) priority(b int, bucketLoad map[int]float64) float64 {
+	if c.Reuse == nil {
+		return bucketLoad[b]
+	}
+	return bucketLoad[b] * (1 - min(max(c.Reuse[b], 0), 1))
+}
+
 func (c Config) movesByLoad(m *Map, hot, cool []Load, counts map[string]int, now time.Time,
 	bucketLoad map[int]float64) []Move {
 	floor := max(c.MinBuckets, 1)
@@ -179,7 +191,8 @@ func (c Config) movesByLoad(m *Map, hot, cool []Load, counts map[string]int, now
 	for _, h := range hot {
 		owned := slices.DeleteFunc(c.movable(m, h.Name, now), func(b int) bool { return bucketLoad[b] <= 0 })
 		slices.SortStableFunc(owned, func(a, b int) int {
-			return cmp.Or(cmp.Compare(bucketLoad[b], bucketLoad[a]), cmp.Compare(a, b))
+			return cmp.Or(cmp.Compare(c.priority(b, bucketLoad), c.priority(a, bucketLoad)),
+				cmp.Compare(bucketLoad[b], bucketLoad[a]), cmp.Compare(a, b))
 		})
 		for _, b := range owned {
 			if len(moves) >= c.MaxMoves || counts[h.Name] <= floor {

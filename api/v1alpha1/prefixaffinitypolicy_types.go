@@ -98,7 +98,26 @@ type RebalanceSpec struct {
 	// +kubebuilder:default="2m"
 	// +optional
 	Cooldown metav1.Duration `json:"cooldown,omitempty"`
+
+	// priority orders the buckets that rebalancing may move, when the scorer's per-bucket counts are read
+	// (scorerMetrics). Load: the busiest bucket that fits first. LoadAndReuse: the bucket whose move relieves the
+	// most load for the least warm cache discarded first, load x (1 - cached share); a busy bucket whose requests
+	// share little (false locality) moves before an equally busy one whose prefixes are reused.
+	// +kubebuilder:default=Load
+	// +optional
+	Priority RebalancePriority `json:"priority,omitempty"`
 }
+
+// RebalancePriority orders the buckets rebalancing may move.
+// +kubebuilder:validation:Enum=Load;LoadAndReuse
+type RebalancePriority string
+
+const (
+	// PriorityLoad moves the busiest bucket that fits first (thesis Alg. 4).
+	PriorityLoad RebalancePriority = "Load"
+	// PriorityLoadAndReuse weighs each bucket's load against the share of its prompt tokens served from cache.
+	PriorityLoadAndReuse RebalancePriority = "LoadAndReuse"
+)
 
 // ScorerAuth selects how the controller authenticates to the scorer's metrics endpoint.
 // +kubebuilder:validation:Enum=None;ServiceAccountToken

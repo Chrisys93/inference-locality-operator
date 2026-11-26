@@ -150,15 +150,9 @@ func (r *PrefixAffinityPolicyReconciler) Reconcile(ctx context.Context, req ctrl
 	if measured && len(names) > 1 {
 		cfg := triggerConfig(spec)
 		cfg.MinBuckets = minBuckets(int(spec.Buckets), len(names), int(*spec.Rebalance.MinSharePercent))
-		var bucketLoad map[int]float64
-		if rd.perBucket != nil {
-			bucketLoad = map[int]float64{}
-			for b, c := range rd.perBucket {
-				if b < len(m.Owners) {
-					bucketLoad[b] = c.Requests
-				}
-			}
-		}
+		bucketLoad, reuse := bucketInputs(rd.perBucket, len(m.Owners),
+			spec.Rebalance.Priority == routingv1alpha1.PriorityLoadAndReuse)
+		cfg.Reuse = reuse
 		var moves []buckets.Move
 		switch {
 		case spec.ScorerMetrics != nil && bucketLoad == nil:
@@ -408,6 +402,29 @@ func anyOverloaded(c buckets.Config, loads []buckets.Load) bool {
 }
 
 // busiest returns the buckets with the most requests in the interval, busiest first.
+// bucketInputs turns the scorer's per-bucket counts into the rebalancer's inputs: each bucket's requests and, with
+// withReuse, the share of its prompt tokens served from cache. Both nil without counts.
+func bucketInputs(perBucket map[int]metrics.BucketCounts, nBuckets int, withReuse bool) (
+	load, reuse map[int]float64) {
+	if perBucket == nil {
+		return nil, nil
+	}
+	load = map[int]float64{}
+	if withReuse {
+		reuse = map[int]float64{}
+	}
+	for b, c := range perBucket {
+		if b >= nBuckets {
+			continue
+		}
+		load[b] = c.Requests
+		if reuse != nil && c.PromptTokens > 0 {
+			reuse[b] = c.CachedTokens / c.PromptTokens
+		}
+	}
+	return load, reuse
+}
+
 func busiest(perBucket map[int]metrics.BucketCounts, m *buckets.Map) []routingv1alpha1.BucketStatus {
 	if perBucket == nil {
 		return nil

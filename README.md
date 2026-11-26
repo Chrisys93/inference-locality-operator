@@ -174,6 +174,7 @@ configured values; GPU measurements are next.
 | `rebalance.maxMovesPerInterval` | `4` | Cap on moves per interval; `0` observes without moving |
 | `rebalance.minSharePercent` | `25` (0-100) | Floor: a replica keeps this share of its fair share of buckets, and at least one |
 | `rebalance.cooldown` | `2m` | Time a moved bucket stays with its new owner |
+| `rebalance.priority` | `Load` | With `scorerMetrics`: `Load` moves the busiest bucket that fits first; `LoadAndReuse` ranks by load × (1 − cached share), so a busy bucket whose requests share little moves before one whose prefixes are reused |
 | `scorerMetrics.service` | unset | The EPP's Service in the policy's namespace; set it to move busiest buckets first |
 | `scorerMetrics.port`, `.path` | `9090`, `/metrics` | The EPP's metrics endpoint |
 | `scorerMetrics.auth` | `None` | `ServiceAccountToken` sends the controller's token (the EPP checks tokens by default); never sent to an ExternalName Service |

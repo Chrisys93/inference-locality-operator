@@ -43,7 +43,9 @@ The synthetic workload (random-word documents, 32 output tokens) measures load a
 
 ## E1 Convergence after a popularity shift (no new mechanism)
 
-Arms R1, R2s-index, R2s-load (as in gpu-rebalance-002); workload shift, open loop. Per 30-s interval and per phase:
+Arms R1, R2s-index, R2s-load (as in gpu-rebalance-002) and R2s-hybrid (`rebalance.priority: LoadAndReuse`: load
+weighed against each bucket's cached share, so the move that relieves most load for the least warm cache goes
+first); workload shift, open loop. Per 30-s interval and per phase:
 
 - **time to converge** after each shift: intervals until the busiest replica's share stays at or below 60% and the
   cached share of prompt tokens is back within 5 points of the phase's steady state;
@@ -103,7 +105,9 @@ trade-off curve against the reuse gained.
   is deliberately approximate, where its threshold traces the correctness curve. The embedding's cost per request is
   measured with it.
 
-Arms for E4: byte-prefix key (now), context-ID key, context-embedding key; layouts and wordings as above.
+Arms for E4: byte-prefix key (now), context-ID key, context-embedding key; layouts and wordings as above. With
+the byte-prefix key, R2s-hybrid is the safeguard against false locality at the placement level: a bucket that is
+busy because of a shared template has a low cached share, so it moves first and costs no warm cache.
 
 ## E5 Heterogeneity: hardware, precision, models
 
