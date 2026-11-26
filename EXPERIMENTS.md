@@ -119,6 +119,16 @@ quality cost as well as a time cost. Measured as E4's correctness share and outp
 step allows. Needs hardware beyond this machine for the hardware axis; precision (fp16 against fp8 KV) and fine-tuned
 variants are possible here.
 
+**Models split across unlike devices** (the case of code-doc-assistant's heavy tier, DeepSeek-Coder-V2-Lite with 24
+of its 27 layers on the GPU). Splitting adds a third kind of state movement, next to placing whole replicas and
+moving a bucket's KV (E2): moving layers, and the KV cache that goes with them, between unlike devices, which is the
+setting of EdgeFlow (arXiv 2610.22172). Its authors chose a llama.cpp-based engine over vLLM because vLLM "was
+originally designed for cloud-based LLM inference with homogeneous GPUs and currently does not support
+resource-adaptive model partition". The engine choice for such runs follows from that: llama.cpp splits by capacity
+(`--n-gpu-layers` for GPU/CPU offload, `--tensor-split` for uneven ratios across GPUs, an RPC backend across machines);
+vLLM's tensor and pipeline parallelism assume alike workers, with one memory fraction for all (an environment
+variable for uneven pipeline stages, `VLLM_PP_LAYER_PARTITION`, is to be verified before use).
+
 ## Common method
 
 Two vLLM replicas of code-doc-assistant's `lightest` tier on one 12 GB GPU (`hack/gpu/`); prefix caches emptied and
